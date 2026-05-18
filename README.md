@@ -38,8 +38,8 @@ The server listens on `127.0.0.1:8080` by default and stores data in `tokenaltar
 Client requests must use `Authorization: Bearer sk-...`.
 Console sessions use `Authorization: Bearer ta-...`.
 
-Text protocol conversion supports text messages, `system`, `temperature`, max token controls, and basic tool/function fields across OpenAI, Anthropic, and Gemini.
-Images, files, embeddings, rerank, realtime, audio, and non-text extensions are intentionally outside the current gateway surface.
+Text protocol conversion supports text messages, image inputs, `system`, `temperature`, max token controls, and basic tool/function fields across OpenAI, Anthropic, and Gemini.
+Files, embeddings, rerank, realtime, audio, and other non-text extensions are intentionally outside the current gateway surface.
 
 ## Operational Notes
 

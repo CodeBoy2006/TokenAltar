@@ -47,3 +47,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Verified `pnpm --dir frontend build`; checked 1366x900 and 2048x1373 hero/title/card geometry for no overlap and zero horizontal page overflow.
+
+## [2026-05-18 16:24] Image Input Protocol Support
+- **Changes:** Extended the shared protocol layer to parse and serialize image parts for OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini Generate Content; added conservative image token prechecks; added Gemini image normalization in the gateway so external URLs are fetched and converted to `inlineData` before forwarding; updated tests and README gateway notes.
+- **Status:** Completed
+- **Next Steps:** Add provider-specific edge cases if a live upstream rejects any of the accepted image shapes.
+- **Context:** Same-protocol passthrough remains direct; cross-protocol text plus image conversion is intentionally minimal and limited to the current text API surface.

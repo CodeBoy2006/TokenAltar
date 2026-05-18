@@ -316,6 +316,51 @@ async fn openai_chat_can_route_to_gemini_text_channel() {
 }
 
 #[tokio::test]
+async fn openai_responses_with_image_routes_to_gemini_inline_data() {
+    let image_url = spawn_image_source_upstream().await;
+    let upstream = spawn_gemini_image_upstream().await;
+    let (state, token) = setup_state_with_provider(upstream, "gemini").await;
+    let app = build_router(state.clone(), &test_config("unused"));
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({
+                        "model": "gemini-test",
+                        "input": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "look"},
+                                {"type": "input_image", "image_url": image_url}
+                            ]
+                        }],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["object"], "response");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let ledger = state.db.list_ledger(None).await.unwrap();
+    assert_eq!(ledger[0]["input_tokens"], 6);
+    assert_eq!(ledger[0]["output_tokens"], 2);
+}
+
+#[tokio::test]
 async fn gemini_to_gemini_channel_is_passthrough_without_internal_fields() {
     let upstream = spawn_gemini_passthrough_upstream().await;
     let (state, token) = setup_state_with_provider(upstream, "gemini").await;
@@ -356,6 +401,49 @@ async fn gemini_to_gemini_channel_is_passthrough_without_internal_fields() {
     let ledger = state.db.list_ledger(None).await.unwrap();
     assert_eq!(ledger[0]["input_tokens"], 5);
     assert_eq!(ledger[0]["output_tokens"], 2);
+}
+
+#[tokio::test]
+async fn gemini_to_gemini_image_passthrough_keeps_file_data() {
+    let upstream = spawn_gemini_image_passthrough_upstream().await;
+    let (state, token) = setup_state_with_provider(upstream, "gemini").await;
+    let app = build_router(state.clone(), &test_config("unused"));
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/gemini-test:generateContent")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({
+                        "contents": [{
+                            "role": "user",
+                            "parts": [{
+                                "fileData": {
+                                    "fileUri": "https://local.test/direct-gemini.png",
+                                    "mimeType": "image/png"
+                                }
+                            }]
+                        }],
+                        "generationConfig": {"temperature": 0.2}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["candidates"][0]["content"]["parts"][0]["text"],
+        "direct image ok"
+    );
 }
 
 async fn setup_state(upstream: String) -> (AppState, String) {
@@ -519,4 +607,85 @@ async fn spawn_gemini_passthrough_upstream() -> String {
         axum::serve(listener, app).await.unwrap();
     });
     format!("http://{addr}")
+}
+
+async fn spawn_gemini_image_upstream() -> String {
+    async fn generate(Json(body): Json<Value>) -> Json<Value> {
+        assert_eq!(body["contents"][0]["parts"][0]["text"], "look");
+        assert_eq!(
+            body["contents"][0]["parts"][1]["inlineData"]["mimeType"],
+            "image/png"
+        );
+        assert_eq!(
+            body["contents"][0]["parts"][1]["inlineData"]["data"],
+            "aW1hZ2UtYnl0ZXM="
+        );
+        Json(json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": "gemini image ok"}]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 6,
+                "candidatesTokenCount": 2,
+                "totalTokenCount": 8
+            }
+        }))
+    }
+    let app = Router::new().route("/v1beta/models/{model_action}", post(generate));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn spawn_gemini_image_passthrough_upstream() -> String {
+    async fn generate(Json(body): Json<Value>) -> Json<Value> {
+        assert_eq!(body["contents"][0]["parts"][0]["fileData"]["fileUri"], "https://local.test/direct-gemini.png");
+        assert_eq!(body["contents"][0]["parts"][0]["fileData"]["mimeType"], "image/png");
+        Json(json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": "direct image ok"}]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 5,
+                "candidatesTokenCount": 1,
+                "totalTokenCount": 6
+            }
+        }))
+    }
+    let app = Router::new().route("/v1beta/models/{model_action}", post(generate));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn spawn_image_source_upstream() -> String {
+    async fn image() -> axum::http::Response<axum::body::Body> {
+        let mut response = axum::http::Response::new(axum::body::Body::from("image-bytes"));
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("image/png"),
+        );
+        response
+    }
+    let app = Router::new().route("/tokenaltar-gemini.png", axum::routing::get(|| async { image().await }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}/tokenaltar-gemini.png")
 }

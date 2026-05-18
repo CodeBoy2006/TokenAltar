@@ -36,9 +36,35 @@ pub struct TextRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextMessage {
     pub role: String,
-    pub content: String,
+    pub content: Vec<MessagePart>,
     pub tool_calls: Option<Value>,
     pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MessagePart {
+    Text(String),
+    Image(ImageInput),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageInput {
+    pub source: ImageSource,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ImageSource {
+    Url(String),
+    Base64 {
+        media_type: String,
+        data: String,
+    },
+    FileId(String),
+    FileUri {
+        file_uri: String,
+        media_type: Option<String>,
+    },
 }
 
 impl TextRequest {
@@ -100,9 +126,9 @@ pub fn upstream_body(
     provider_protocol: ProviderProtocol,
     raw_body: &Value,
     request: &TextRequest,
-) -> Value {
+) -> AppResult<Value> {
     if same_wire_protocol(client_protocol, provider_protocol) {
-        return strip_internal_fields(raw_body);
+        return Ok(strip_internal_fields(raw_body));
     }
     match provider_protocol {
         ProviderProtocol::OpenAiResponses => text_to_openai_responses(request),
@@ -135,7 +161,6 @@ pub fn client_response_body(
 }
 
 fn parse_openai_chat_completions(value: &Value) -> AppResult<TextRequest> {
-    reject_non_text_payload(value)?;
     let model = required_string(value, "model", "chat completions request requires model")?;
     let stream = value
         .get("stream")
@@ -160,9 +185,9 @@ fn parse_openai_chat_completions(value: &Value) -> AppResult<TextRequest> {
             .and_then(Value::as_str)
             .unwrap_or("user")
             .to_string();
-        let content = openai_content_to_text(message.get("content"))?;
+        let content = openai_content_to_parts(message.get("content"))?;
         if role == "system" {
-            system_parts.push(content);
+            system_parts.push(parts_to_text_only(&content, "chat completions system message")?);
             continue;
         }
         messages.push(TextMessage {
@@ -188,7 +213,6 @@ fn parse_openai_chat_completions(value: &Value) -> AppResult<TextRequest> {
 }
 
 fn parse_openai_responses(value: &Value) -> AppResult<TextRequest> {
-    reject_non_text_payload(value)?;
     let model = required_string(value, "model", "responses request requires model")?;
     let stream = value
         .get("stream")
@@ -216,7 +240,6 @@ fn parse_openai_responses(value: &Value) -> AppResult<TextRequest> {
 }
 
 fn parse_anthropic_messages(value: &Value) -> AppResult<TextRequest> {
-    reject_non_text_payload(value)?;
     let model = required_string(value, "model", "messages request requires model")?;
     let stream = value
         .get("stream")
@@ -229,9 +252,11 @@ fn parse_anthropic_messages(value: &Value) -> AppResult<TextRequest> {
         Some(Value::Array(items)) => non_empty_join(
             items
                 .iter()
-                .filter_map(|item| item.get("text").and_then(Value::as_str))
-                .map(ToString::to_string)
-                .collect(),
+                .map(|item| {
+                    let parts = anthropic_content_to_parts(Some(item))?;
+                    parts_to_text_only(&parts, "anthropic system message")
+                })
+                .collect::<AppResult<Vec<_>>>()?,
         ),
         _ => None,
     };
@@ -248,7 +273,7 @@ fn parse_anthropic_messages(value: &Value) -> AppResult<TextRequest> {
                 .to_string();
             Ok(TextMessage {
                 role,
-                content: anthropic_content_to_text(message.get("content"))?,
+                content: anthropic_content_to_parts(message.get("content"))?,
                 tool_calls: None,
                 tool_call_id: None,
             })
@@ -267,7 +292,6 @@ fn parse_anthropic_messages(value: &Value) -> AppResult<TextRequest> {
 }
 
 fn parse_gemini_generate_content(value: &Value) -> AppResult<TextRequest> {
-    reject_non_text_payload(value)?;
     let model = value
         .get("model")
         .and_then(Value::as_str)
@@ -293,7 +317,10 @@ fn parse_gemini_generate_content(value: &Value) -> AppResult<TextRequest> {
         .and_then(Value::as_f64);
     let system = value
         .get("systemInstruction")
-        .and_then(|item| gemini_parts_to_text(item.get("parts")))
+        .and_then(|item| {
+            let parts = gemini_parts_to_message_parts(item.get("parts")).ok()?;
+            parts_to_text_only(&parts, "gemini system instruction").ok()
+        })
         .filter(|text| !text.is_empty());
     let messages = value
         .get("contents")
@@ -308,7 +335,7 @@ fn parse_gemini_generate_content(value: &Value) -> AppResult<TextRequest> {
             };
             Ok(TextMessage {
                 role: role.to_string(),
-                content: gemini_parts_to_text(content.get("parts")).unwrap_or_default(),
+                content: gemini_parts_to_message_parts(content.get("parts"))?,
                 tool_calls: None,
                 tool_call_id: None,
             })
@@ -335,14 +362,14 @@ fn strip_internal_fields(value: &Value) -> Value {
     clean
 }
 
-fn text_to_openai_responses(request: &TextRequest) -> Value {
+fn text_to_openai_responses(request: &TextRequest) -> AppResult<Value> {
     let mut input = Vec::new();
     for message in &request.messages {
         if message.role == "tool" {
             input.push(json!({
                 "type": "function_call_output",
                 "call_id": message.tool_call_id.clone().unwrap_or_default(),
-                "output": message.content,
+                "output": message_text_content(&message.content),
             }));
         } else if let Some(tool_calls) = &message.tool_calls {
             input.push(json!({
@@ -353,9 +380,15 @@ fn text_to_openai_responses(request: &TextRequest) -> Value {
                 "arguments": tool_calls.get("function").and_then(|f| f.get("arguments")).cloned().unwrap_or(Value::String("{}".to_string())),
             }));
         } else {
+            let text_type = if message.role == "assistant" {
+                "output_text"
+            } else {
+                "input_text"
+            };
+            let content = openai_responses_content_items(&message.content, text_type)?;
             input.push(json!({
                 "role": message.role,
-                "content": [{"type": "input_text", "text": message.content}],
+                "content": content,
             }));
         }
     }
@@ -379,20 +412,21 @@ fn text_to_openai_responses(request: &TextRequest) -> Value {
     if let Some(tool_choice) = &request.tool_choice {
         body["tool_choice"] = tool_choice.clone();
     }
-    body
+    Ok(body)
 }
 
-fn text_to_anthropic_messages(request: &TextRequest) -> Value {
+fn text_to_anthropic_messages(request: &TextRequest) -> AppResult<Value> {
     let messages = request
         .messages
         .iter()
-        .map(|message| {
-            json!({
+        .map(|message| -> AppResult<Value> {
+            let content = anthropic_content_items(&message.content)?;
+            Ok(json!({
                 "role": if message.role == "assistant" { "assistant" } else { "user" },
-                "content": [{"type": "text", "text": message.content}],
-            })
+                "content": content,
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<AppResult<Vec<_>>>()?;
     let mut body = json!({
         "model": request.model,
         "messages": messages,
@@ -411,20 +445,20 @@ fn text_to_anthropic_messages(request: &TextRequest) -> Value {
     if let Some(tool_choice) = &request.tool_choice {
         body["tool_choice"] = tool_choice.clone();
     }
-    body
+    Ok(body)
 }
 
-fn text_to_gemini_generate_content(request: &TextRequest) -> Value {
+fn text_to_gemini_generate_content(request: &TextRequest) -> AppResult<Value> {
     let contents = request
         .messages
         .iter()
-        .map(|message| {
-            json!({
+        .map(|message| -> AppResult<Value> {
+            Ok(json!({
                 "role": if message.role == "assistant" { "model" } else { "user" },
-                "parts": [{"text": message.content}],
-            })
+                "parts": gemini_content_parts(&message.content)?,
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<AppResult<Vec<_>>>()?;
     let mut generation_config = Map::new();
     if let Some(max_tokens) = request.max_tokens {
         generation_config.insert(
@@ -449,7 +483,7 @@ fn text_to_gemini_generate_content(request: &TextRequest) -> Value {
     if let Some(tools) = &request.tools {
         body["tools"] = openai_tools_to_gemini(tools);
     }
-    body
+    Ok(body)
 }
 
 fn response_to_chat_completions(
@@ -793,7 +827,7 @@ fn parse_responses_input(input: Option<&Value>) -> AppResult<Vec<TextMessage>> {
     match input {
         Some(Value::String(text)) => Ok(vec![TextMessage {
             role: "user".to_string(),
-            content: text.clone(),
+            content: vec![MessagePart::Text(text.clone())],
             tool_calls: None,
             tool_call_id: None,
         }]),
@@ -803,11 +837,7 @@ fn parse_responses_input(input: Option<&Value>) -> AppResult<Vec<TextMessage>> {
                 if item.get("type").and_then(Value::as_str) == Some("function_call_output") {
                     return Ok(TextMessage {
                         role: "tool".to_string(),
-                        content: item
-                            .get("output")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
+                        content: openai_content_to_parts(item.get("output"))?,
                         tool_calls: None,
                         tool_call_id: item
                             .get("call_id")
@@ -818,7 +848,7 @@ fn parse_responses_input(input: Option<&Value>) -> AppResult<Vec<TextMessage>> {
                 if item.get("type").and_then(Value::as_str) == Some("function_call") {
                     return Ok(TextMessage {
                         role: "assistant".to_string(),
-                        content: String::new(),
+                        content: Vec::new(),
                         tool_calls: Some(item.clone()),
                         tool_call_id: item
                             .get("call_id")
@@ -833,7 +863,7 @@ fn parse_responses_input(input: Option<&Value>) -> AppResult<Vec<TextMessage>> {
                     .to_string();
                 Ok(TextMessage {
                     role,
-                    content: openai_content_to_text(item.get("content"))?,
+                    content: openai_content_to_parts(item.get("content"))?,
                     tool_calls: item.get("tool_calls").cloned(),
                     tool_call_id: item
                         .get("tool_call_id")
@@ -848,61 +878,433 @@ fn parse_responses_input(input: Option<&Value>) -> AppResult<Vec<TextMessage>> {
     }
 }
 
-fn openai_content_to_text(content: Option<&Value>) -> AppResult<String> {
+fn openai_content_to_parts(content: Option<&Value>) -> AppResult<Vec<MessagePart>> {
     match content {
-        Some(Value::String(text)) => Ok(text.clone()),
-        Some(Value::Array(items)) => {
-            let mut text = String::new();
-            for item in items {
-                match item.get("type").and_then(Value::as_str) {
-                    Some("input_text") | Some("output_text") | Some("text") => {
-                        if let Some(part) = item.get("text").and_then(Value::as_str) {
-                            text.push_str(part);
-                        }
-                    }
-                    Some(other) => {
-                        return Err(AppError::BadRequest(format!(
-                            "unsupported non-text OpenAI content item type: {other}"
-                        )));
-                    }
-                    None => {}
-                }
-            }
-            Ok(text)
-        }
-        _ => Ok(String::new()),
+        Some(Value::String(text)) => Ok(vec![MessagePart::Text(text.clone())]),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(openai_content_item_to_part)
+            .collect(),
+        Some(Value::Null) | None => Ok(Vec::new()),
+        Some(other) => Err(AppError::BadRequest(format!(
+            "unsupported OpenAI content shape: {other}"
+        ))),
     }
 }
 
-fn anthropic_content_to_text(content: Option<&Value>) -> AppResult<String> {
-    match content {
-        Some(Value::String(text)) => Ok(text.clone()),
-        Some(Value::Array(items)) => {
-            let mut text = String::new();
-            for item in items {
-                match item.get("type").and_then(Value::as_str) {
-                    Some("text") => {
-                        if let Some(part) = item.get("text").and_then(Value::as_str) {
-                            text.push_str(part);
-                        }
-                    }
-                    Some("tool_result") => {
-                        if let Some(part) = item.get("content").and_then(Value::as_str) {
-                            text.push_str(part);
-                        }
-                    }
-                    Some("tool_use") => {}
-                    Some(other) => {
-                        return Err(AppError::BadRequest(format!(
-                            "unsupported non-text Anthropic content item type: {other}"
-                        )));
-                    }
-                    None => {}
-                }
+fn openai_content_item_to_part(item: &Value) -> Option<AppResult<MessagePart>> {
+    let item_type = item.get("type").and_then(Value::as_str)?;
+    match item_type {
+        "text" | "input_text" | "output_text" => item
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| Ok(MessagePart::Text(text.to_string()))),
+        "image_url" | "input_image" => Some(parse_openai_image_input(item).map(MessagePart::Image)),
+        "tool_result" => item
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|text| Ok(MessagePart::Text(text.to_string()))),
+        "tool_use" => None,
+        "input_audio" | "input_file" | "audio" | "video" | "document" => Some(Err(
+            AppError::BadRequest(format!(
+                "unsupported non-text OpenAI content item type: {item_type}"
+            )),
+        )),
+        other => Some(Err(AppError::BadRequest(format!(
+            "unsupported non-text OpenAI content item type: {other}"
+        )))),
+    }
+}
+
+fn parse_openai_image_input(item: &Value) -> AppResult<ImageInput> {
+    if let Some(file_id) = item.get("file_id").and_then(Value::as_str) {
+        return Ok(ImageInput {
+            source: ImageSource::FileId(file_id.to_string()),
+            detail: item
+                .get("detail")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        });
+    }
+    let detail = item
+        .get("detail")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let image_value = item.get("image_url").ok_or_else(|| {
+        AppError::BadRequest("OpenAI image content item missing image_url".to_string())
+    })?;
+    parse_image_input_value(image_value, detail)
+}
+
+fn parse_image_input_value(value: &Value, detail: Option<String>) -> AppResult<ImageInput> {
+    match value {
+        Value::String(url) => Ok(ImageInput {
+            source: image_source_from_string(url),
+            detail,
+        }),
+        Value::Object(map) => {
+            let detail = detail.or_else(|| {
+                map.get("detail")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            });
+            if let Some(url) = map.get("url").and_then(Value::as_str) {
+                return Ok(ImageInput {
+                    source: image_source_from_string(url),
+                    detail,
+                });
             }
-            Ok(text)
+            if let Some(file_id) = map.get("file_id").and_then(Value::as_str) {
+                return Ok(ImageInput {
+                    source: ImageSource::FileId(file_id.to_string()),
+                    detail,
+                });
+            }
+            if let Some(file_uri) = map
+                .get("file_uri")
+                .or_else(|| map.get("fileUri"))
+                .and_then(Value::as_str)
+            {
+                return Ok(ImageInput {
+                    source: ImageSource::FileUri {
+                        file_uri: file_uri.to_string(),
+                        media_type: map
+                            .get("media_type")
+                            .or_else(|| map.get("mime_type"))
+                            .or_else(|| map.get("mimeType"))
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string),
+                    },
+                    detail,
+                });
+            }
+            if let Some(data) = map.get("data").and_then(Value::as_str) {
+                let media_type = map
+                    .get("media_type")
+                    .or_else(|| map.get("mime_type"))
+                    .or_else(|| map.get("mimeType"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/png");
+                return Ok(ImageInput {
+                    source: ImageSource::Base64 {
+                        media_type: media_type.to_string(),
+                        data: data.to_string(),
+                    },
+                    detail,
+                });
+            }
+            Err(AppError::BadRequest(
+                "image content item missing image_url url".to_string(),
+            ))
         }
-        _ => Ok(String::new()),
+        other => Err(AppError::BadRequest(format!(
+            "unsupported OpenAI image source: {other}"
+        ))),
+    }
+}
+
+fn image_source_from_string(url: &str) -> ImageSource {
+    if let Some((media_type, data)) = parse_data_uri(url) {
+        ImageSource::Base64 { media_type, data }
+    } else {
+        ImageSource::Url(url.to_string())
+    }
+}
+
+fn parse_data_uri(value: &str) -> Option<(String, String)> {
+    let remainder = value.strip_prefix("data:")?;
+    let (media_type, data) = remainder.split_once(";base64,")?;
+    Some((
+        if media_type.is_empty() {
+            "image/png".to_string()
+        } else {
+            media_type.to_string()
+        },
+        data.to_string(),
+    ))
+}
+
+fn anthropic_content_to_parts(content: Option<&Value>) -> AppResult<Vec<MessagePart>> {
+    match content {
+        Some(Value::String(text)) => Ok(vec![MessagePart::Text(text.clone())]),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(anthropic_content_item_to_part)
+            .collect(),
+        Some(Value::Null) | None => Ok(Vec::new()),
+        Some(other) => Err(AppError::BadRequest(format!(
+            "unsupported Anthropic content shape: {other}"
+        ))),
+    }
+}
+
+fn anthropic_content_item_to_part(item: &Value) -> Option<AppResult<MessagePart>> {
+    let item_type = item.get("type").and_then(Value::as_str)?;
+    match item_type {
+        "text" => item
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| Ok(MessagePart::Text(text.to_string()))),
+        "image" => Some(parse_anthropic_image_input(item).map(MessagePart::Image)),
+        "tool_result" => item
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|text| Ok(MessagePart::Text(text.to_string()))),
+        "tool_use" => None,
+        "input_audio" | "input_file" | "audio" | "video" | "document" => Some(Err(
+            AppError::BadRequest(format!(
+                "unsupported non-text Anthropic content item type: {item_type}"
+            )),
+        )),
+        other => Some(Err(AppError::BadRequest(format!(
+            "unsupported non-text Anthropic content item type: {other}"
+        )))),
+    }
+}
+
+fn parse_anthropic_image_input(item: &Value) -> AppResult<ImageInput> {
+    let detail = item
+        .get("detail")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let source = item.get("source").ok_or_else(|| {
+        AppError::BadRequest("Anthropic image content item missing source".to_string())
+    })?;
+    parse_image_input_value(source, detail)
+}
+
+fn gemini_parts_to_message_parts(parts: Option<&Value>) -> AppResult<Vec<MessagePart>> {
+    let Some(parts) = parts.and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut content = Vec::new();
+    for part in parts {
+        if let Some(text) = part.get("text").and_then(Value::as_str) {
+            content.push(MessagePart::Text(text.to_string()));
+            continue;
+        }
+        if let Some(inline_data) = part
+            .get("inlineData")
+            .or_else(|| part.get("inline_data"))
+        {
+            content.push(MessagePart::Image(parse_gemini_inline_data(inline_data)?));
+            continue;
+        }
+        if let Some(file_data) = part.get("fileData").or_else(|| part.get("file_data")) {
+            content.push(MessagePart::Image(parse_gemini_file_data(file_data)?));
+            continue;
+        }
+        if part.get("functionCall").is_some()
+            || part.get("function_call").is_some()
+            || part.get("functionResponse").is_some()
+            || part.get("function_response").is_some()
+            || part.get("executableCode").is_some()
+            || part.get("codeExecutionResult").is_some()
+            || part.get("thoughtSignature").is_some()
+            || part.get("thought").is_some()
+        {
+            continue;
+        }
+        if let Some(other) = part.get("type").and_then(Value::as_str) {
+            return Err(AppError::BadRequest(format!(
+                "unsupported non-text Gemini content item type: {other}"
+            )));
+        }
+    }
+    Ok(content)
+}
+
+fn parse_gemini_inline_data(value: &Value) -> AppResult<ImageInput> {
+    let media_type = value
+        .get("mimeType")
+        .or_else(|| value.get("mime_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("image/png")
+        .to_string();
+    let data = value
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("Gemini inlineData missing data".to_string()))?;
+    Ok(ImageInput {
+        source: ImageSource::Base64 {
+            media_type,
+            data: data.to_string(),
+        },
+        detail: None,
+    })
+}
+
+fn parse_gemini_file_data(value: &Value) -> AppResult<ImageInput> {
+    let file_uri = value
+        .get("fileUri")
+        .or_else(|| value.get("file_uri"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("Gemini fileData missing fileUri".to_string()))?;
+    Ok(ImageInput {
+        source: ImageSource::FileUri {
+            file_uri: file_uri.to_string(),
+            media_type: value
+                .get("mimeType")
+                .or_else(|| value.get("mime_type"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        },
+        detail: None,
+    })
+}
+
+fn parts_to_text_only(parts: &[MessagePart], field: &str) -> AppResult<String> {
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            MessagePart::Text(chunk) => text.push_str(chunk),
+            MessagePart::Image(_) => {
+                return Err(AppError::BadRequest(format!(
+                    "{field} does not support image content"
+                )));
+            }
+        }
+    }
+    Ok(text)
+}
+
+fn message_text_content(parts: &[MessagePart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text(text) => Some(text.as_str()),
+            MessagePart::Image(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn openai_responses_content_items(parts: &[MessagePart], text_type: &str) -> AppResult<Vec<Value>> {
+    parts
+        .iter()
+        .map(|part| match part {
+            MessagePart::Text(text) => Ok(json!({
+                "type": text_type,
+                "text": text,
+            })),
+            MessagePart::Image(image) => image_input_to_openai_responses_item(image),
+        })
+        .collect()
+}
+
+fn anthropic_content_items(parts: &[MessagePart]) -> AppResult<Vec<Value>> {
+    parts
+        .iter()
+        .map(|part| match part {
+            MessagePart::Text(text) => Ok(json!({
+                "type": "text",
+                "text": text,
+            })),
+            MessagePart::Image(image) => Ok(json!({
+                "type": "image",
+                "source": image_input_to_anthropic_source(image)?,
+            })),
+        })
+        .collect()
+}
+
+fn gemini_content_parts(parts: &[MessagePart]) -> AppResult<Vec<Value>> {
+    parts
+        .iter()
+        .map(|part| match part {
+            MessagePart::Text(text) => Ok(json!({
+                "text": text,
+            })),
+            MessagePart::Image(image) => image_input_to_gemini_part(image),
+        })
+        .collect()
+}
+
+fn image_input_to_openai_responses_item(image: &ImageInput) -> AppResult<Value> {
+    let mut item = Map::new();
+    item.insert(
+        "type".to_string(),
+        Value::String("input_image".to_string()),
+    );
+    if let Some(detail) = &image.detail {
+        item.insert("detail".to_string(), Value::String(detail.clone()));
+    }
+    match &image.source {
+        ImageSource::Url(url) => {
+            item.insert("image_url".to_string(), Value::String(url.clone()));
+        }
+        ImageSource::Base64 { media_type, data } => {
+            item.insert(
+                "image_url".to_string(),
+                Value::String(format!("data:{media_type};base64,{data}")),
+            );
+        }
+        ImageSource::FileId(file_id) => {
+            item.insert("file_id".to_string(), Value::String(file_id.clone()));
+        }
+        ImageSource::FileUri { file_uri, .. } => {
+            if file_uri.starts_with("http://") || file_uri.starts_with("https://") {
+                item.insert("image_url".to_string(), Value::String(file_uri.clone()));
+            } else {
+                return Err(AppError::BadRequest(format!(
+                    "unsupported image source for OpenAI responses: {file_uri}"
+                )));
+            }
+        }
+    }
+    Ok(Value::Object(item))
+}
+
+fn image_input_to_anthropic_source(image: &ImageInput) -> AppResult<Value> {
+    match &image.source {
+        ImageSource::Url(url) => Ok(json!({
+            "type": "url",
+            "url": url,
+        })),
+        ImageSource::Base64 { media_type, data } => Ok(json!({
+            "type": "base64",
+            "media_type": media_type,
+            "data": data,
+        })),
+        ImageSource::FileUri { file_uri, .. } => Ok(json!({
+            "type": "url",
+            "url": file_uri,
+        })),
+        ImageSource::FileId(file_id) => Err(AppError::BadRequest(format!(
+            "unsupported image source for Anthropic image block: {file_id}"
+        ))),
+    }
+}
+
+fn image_input_to_gemini_part(image: &ImageInput) -> AppResult<Value> {
+    match &image.source {
+        ImageSource::Base64 { media_type, data } => Ok(json!({
+            "inlineData": {
+                "mimeType": media_type,
+                "data": data,
+            }
+        })),
+        ImageSource::Url(url) => Ok(json!({
+            "fileData": {
+                "fileUri": url,
+            }
+        })),
+        ImageSource::FileUri {
+            file_uri,
+            media_type,
+        } => {
+            let mut file_data = Map::new();
+            file_data.insert("fileUri".to_string(), Value::String(file_uri.clone()));
+            if let Some(media_type) = media_type {
+                file_data.insert("mimeType".to_string(), Value::String(media_type.clone()));
+            }
+            let mut part = Map::new();
+            part.insert("fileData".to_string(), Value::Object(file_data));
+            Ok(Value::Object(part))
+        }
+        ImageSource::FileId(file_id) => Err(AppError::BadRequest(format!(
+            "unsupported image source for Gemini fileData: {file_id}"
+        ))),
     }
 }
 
@@ -959,43 +1361,6 @@ fn openai_tools_to_gemini(tools: &Value) -> Value {
     json!([{ "functionDeclarations": function_declarations }])
 }
 
-fn reject_non_text_payload(value: &Value) -> AppResult<()> {
-    fn visit(value: &Value) -> Option<String> {
-        match value {
-            Value::Object(map) => {
-                for (key, value) in map {
-                    if matches!(
-                        key.as_str(),
-                        "image_url"
-                            | "input_audio"
-                            | "input_image"
-                            | "input_file"
-                            | "inline_data"
-                            | "file_data"
-                            | "audio"
-                            | "video"
-                            | "document"
-                    ) {
-                        return Some(key.clone());
-                    }
-                    if let Some(reason) = visit(value) {
-                        return Some(reason);
-                    }
-                }
-                None
-            }
-            Value::Array(items) => items.iter().find_map(visit),
-            _ => None,
-        }
-    }
-    if let Some(field) = visit(value) {
-        return Err(AppError::BadRequest(format!(
-            "unsupported non-text payload field: {field}"
-        )));
-    }
-    Ok(())
-}
-
 fn required_string(value: &Value, field: &str, message: &str) -> AppResult<String> {
     value
         .get(field)
@@ -1030,7 +1395,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let outbound = text_to_openai_responses(&request);
+        let outbound = text_to_openai_responses(&request).unwrap();
         assert_eq!(outbound["instructions"], "be terse");
         assert_eq!(outbound["max_output_tokens"], 64);
         assert_eq!(outbound["input"][0]["content"][0]["text"], "hello");
@@ -1063,9 +1428,140 @@ mod tests {
             }),
         )
         .unwrap();
-        let outbound = text_to_gemini_generate_content(&request);
+        let outbound = text_to_gemini_generate_content(&request).unwrap();
         assert_eq!(outbound["contents"][0]["parts"][0]["text"], "hello");
         assert_eq!(outbound["generationConfig"]["maxOutputTokens"], 64);
+    }
+
+    #[test]
+    fn parses_openai_chat_image_input() {
+        let request = parse_client_request(
+            ClientProtocol::OpenAiChatCompletions,
+            &json!({
+                "model": "gpt-4o-mini",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8=", "detail": "low"}}
+                    ]
+                }]
+            }),
+        )
+        .unwrap();
+        assert_eq!(request.messages[0].content.len(), 2);
+        match &request.messages[0].content[1] {
+            MessagePart::Image(image) => match &image.source {
+                ImageSource::Base64 { media_type, data } => {
+                    assert_eq!(media_type, "image/png");
+                    assert_eq!(data, "aGVsbG8=");
+                }
+                _ => panic!("expected base64 image"),
+            },
+            _ => panic!("expected image part"),
+        }
+    }
+
+    #[test]
+    fn parses_openai_responses_image_input() {
+        let request = parse_client_request(
+            ClientProtocol::OpenAiResponses,
+            &json!({
+                "model": "gpt-4o-mini",
+                "input": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "look"},
+                        {"type": "input_image", "image_url": "https://example.com/a.png"}
+                    ]
+                }]
+            }),
+        )
+        .unwrap();
+        assert_eq!(request.messages[0].content.len(), 2);
+        match &request.messages[0].content[1] {
+            MessagePart::Image(image) => match &image.source {
+                ImageSource::Url(url) => assert_eq!(url, "https://example.com/a.png"),
+                _ => panic!("expected url image"),
+            },
+            _ => panic!("expected image part"),
+        }
+    }
+
+    #[test]
+    fn parses_anthropic_image_blocks() {
+        let request = parse_client_request(
+            ClientProtocol::AnthropicMessages,
+            &json!({
+                "model": "claude-3-5-sonnet",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "aGVsbG8="}}
+                    ]
+                }]
+            }),
+        )
+        .unwrap();
+        assert_eq!(request.messages[0].content.len(), 2);
+        match &request.messages[0].content[1] {
+            MessagePart::Image(image) => match &image.source {
+                ImageSource::Base64 { media_type, data } => {
+                    assert_eq!(media_type, "image/jpeg");
+                    assert_eq!(data, "aGVsbG8=");
+                }
+                _ => panic!("expected base64 image"),
+            },
+            _ => panic!("expected image part"),
+        }
+    }
+
+    #[test]
+    fn parses_gemini_inline_and_file_data() {
+        let request = parse_client_request(
+            ClientProtocol::GeminiGenerateContent,
+            &json!({
+                "model": "gemini-test",
+                "contents": [{
+                    "role": "user",
+                    "parts": [
+                        {"text": "look"},
+                        {"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}},
+                        {"fileData": {"fileUri": "gs://bucket/image.png", "mimeType": "image/png"}}
+                    ]
+                }]
+            }),
+        )
+        .unwrap();
+        assert_eq!(request.messages[0].content.len(), 3);
+        assert!(matches!(request.messages[0].content[1], MessagePart::Image(_)));
+        assert!(matches!(request.messages[0].content[2], MessagePart::Image(_)));
+    }
+
+    #[test]
+    fn same_protocol_passthrough_keeps_image_payload() {
+        let raw = json!({
+            "model": "gpt-test",
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "look"},
+                    {"type": "input_image", "image_url": "https://example.com/a.png"}
+                ]
+            }],
+            "_stream": false
+        });
+        let request = parse_client_request(ClientProtocol::OpenAiResponses, &raw).unwrap();
+        let body = upstream_body(
+            ClientProtocol::OpenAiResponses,
+            ProviderProtocol::OpenAiResponses,
+            &raw,
+            &request,
+        )
+        .unwrap();
+        assert_eq!(body["input"][0]["content"][1]["image_url"], "https://example.com/a.png");
+        assert!(body.get("_stream").is_none());
     }
 
     #[test]

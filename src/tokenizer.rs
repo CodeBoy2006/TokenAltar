@@ -1,6 +1,6 @@
 use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton};
 
-use crate::protocol::TextRequest;
+use crate::protocol::{MessagePart, TextRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenEstimate {
@@ -9,8 +9,11 @@ pub struct TokenEstimate {
 }
 
 pub fn estimate_request_tokens(request: &TextRequest) -> TokenEstimate {
-    let text = serde_json::to_string(request).unwrap_or_else(|_| request.model.clone());
-    estimate_text_tokens(&request.model, &text)
+    let sanitized = sanitize_request_for_token_estimate(request);
+    let text = serde_json::to_string(&sanitized).unwrap_or_else(|_| request.model.clone());
+    let mut estimate = estimate_text_tokens(&request.model, &text);
+    estimate.tokens += count_image_parts(request) * 512;
+    estimate
 }
 
 pub fn estimate_text_tokens(model: &str, text: &str) -> TokenEstimate {
@@ -46,6 +49,27 @@ pub fn estimate_text_tokens(model: &str, text: &str) -> TokenEstimate {
         tokenizer: tokenizer.to_string(),
         tokens: count.max(1) as i64,
     }
+}
+
+fn sanitize_request_for_token_estimate(request: &TextRequest) -> TextRequest {
+    let mut sanitized = request.clone();
+    for message in &mut sanitized.messages {
+        for part in &mut message.content {
+            if matches!(part, MessagePart::Image(_)) {
+                *part = MessagePart::Text("[image]".to_string());
+            }
+        }
+    }
+    sanitized
+}
+
+fn count_image_parts(request: &TextRequest) -> i64 {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter(|part| matches!(part, MessagePart::Image(_)))
+        .count() as i64
 }
 
 #[cfg(test)]

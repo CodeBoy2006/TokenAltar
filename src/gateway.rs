@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use axum::{
     Json,
     body::Body,
@@ -9,7 +10,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -291,7 +292,12 @@ async fn send_upstream(
 ) -> AppResult<reqwest::Response> {
     let provider_protocol = provider_protocol(&decision.channel.provider);
     let path = upstream_path(provider_protocol, &request.model, request.stream);
-    let body = upstream_body(client_protocol, provider_protocol, raw_body, request);
+    let mut body = upstream_body(client_protocol, provider_protocol, raw_body, request)?;
+    if provider_protocol == ProviderProtocol::GeminiGenerateContent
+        && client_protocol != ClientProtocol::GeminiGenerateContent
+    {
+        body = normalize_gemini_image_parts(&state.http, body).await?;
+    }
     let url = format!(
         "{}{}",
         decision.channel.base_url.trim_end_matches('/'),
@@ -307,6 +313,92 @@ async fn send_upstream(
         .send()
         .await
         .map_err(|err| AppError::Upstream(err.to_string()))
+}
+
+async fn normalize_gemini_image_parts(client: &reqwest::Client, mut body: Value) -> AppResult<Value> {
+    if let Some(contents) = body.get_mut("contents").and_then(Value::as_array_mut) {
+        for content in contents {
+            normalize_gemini_content_parts(client, content).await?;
+        }
+    }
+    if let Some(system_instruction) = body.get_mut("systemInstruction") {
+        normalize_gemini_content_parts(client, system_instruction).await?;
+    }
+    Ok(body)
+}
+
+async fn normalize_gemini_content_parts(client: &reqwest::Client, content: &mut Value) -> AppResult<()> {
+    let Some(parts) = content.get_mut("parts").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    for part in parts {
+        normalize_gemini_part(client, part).await?;
+    }
+    Ok(())
+}
+
+async fn normalize_gemini_part(client: &reqwest::Client, part: &mut Value) -> AppResult<()> {
+    let Some(map) = part.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(file_data) = map.get_mut("fileData").and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+    let Some(file_uri) = file_data.get("fileUri").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if !should_fetch_remote_image(file_uri) {
+        return Ok(());
+    }
+    let provided_mime = file_data
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let response = client
+        .get(file_uri)
+        .send()
+        .await
+        .map_err(|err| AppError::Upstream(err.to_string()))?
+        .error_for_status()
+        .map_err(|err| AppError::Upstream(err.to_string()))?;
+    let mime_type = resolve_image_mime_type(response.headers().get(reqwest::header::CONTENT_TYPE), provided_mime)
+        .ok_or_else(|| AppError::BadRequest("unable to determine image mime type for Gemini".to_string()))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|err| AppError::Upstream(err.to_string()))?;
+    let data = STANDARD.encode(bytes);
+    map.remove("fileData");
+    map.insert(
+        "inlineData".to_string(),
+        json!({
+            "mimeType": mime_type,
+            "data": data,
+        }),
+    );
+    Ok(())
+}
+
+fn should_fetch_remote_image(file_uri: &str) -> bool {
+    let lower = file_uri.to_ascii_lowercase();
+    (lower.starts_with("http://") || lower.starts_with("https://"))
+        && !lower.contains("generativelanguage.googleapis.com/v1beta/files/")
+}
+
+fn resolve_image_mime_type(
+    header_value: Option<&reqwest::header::HeaderValue>,
+    provided_mime: Option<String>,
+) -> Option<String> {
+    if let Some(mime) = provided_mime {
+        let mime = mime.split(';').next().unwrap_or("").trim().to_string();
+        if mime.starts_with("image/") {
+            return Some(mime);
+        }
+    }
+    header_value
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or("").trim().to_string())
+        .filter(|value| value.starts_with("image/"))
 }
 
 fn apply_provider_headers(
