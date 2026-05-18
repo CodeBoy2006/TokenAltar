@@ -65,3 +65,9 @@
 - **Status:** Completed
 - **Next Steps:** Smoke test one real upstream channel health check and one rotated client key in production credentials.
 - **Context:** Channel and API key deletion is soft to preserve ledger history; empty channel API key updates keep the existing upstream secret.
+
+## [2026-05-18 22:25] Fire Sale Reset Window Fix
+- **Changes:** Corrected fire-sale activation so it requires both the remaining-token threshold and a real UTC distance-to-reset window before applying discounted routing/pricing.
+- **Status:** Completed
+- **Next Steps:** Confirm production billing reset timezone expectations if they should differ from the existing UTC channel-window logic.
+- **Context:** Targeted pricing tests cover in-window, out-of-window, reset-day, and remaining-threshold behavior.

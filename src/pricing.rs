@@ -1,3 +1,4 @@
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use regex::Regex;
 
 use crate::{
@@ -92,13 +93,40 @@ pub fn fire_sale_discount(channel: &Channel) -> f64 {
 }
 
 pub fn is_fire_sale(channel: &Channel) -> bool {
+    is_fire_sale_at(channel, Utc::now())
+}
+
+fn is_fire_sale_at(channel: &Channel, now: DateTime<Utc>) -> bool {
     let remaining = channel.limits.cycle_limit_tokens - channel.limits.used_cycle_tokens;
-    if channel.limits.cycle_limit_tokens <= 0 {
+    if channel.limits.cycle_limit_tokens <= 0 || channel.limits.fire_sale_days_before <= 0 {
         return false;
     }
     let remaining_pct = remaining as f64 / channel.limits.cycle_limit_tokens as f64;
     remaining_pct > channel.limits.fire_sale_remaining_pct
-        && channel.limits.fire_sale_days_before > 0
+        && next_cycle_reset_at(channel.limits.cycle_reset_day, now)
+            .and_then(|reset_at| reset_at.signed_duration_since(now).to_std().ok())
+            .is_some_and(|until_reset| {
+                until_reset < std::time::Duration::from_secs(
+                    channel.limits.fire_sale_days_before as u64 * 24 * 60 * 60,
+                )
+            })
+}
+
+fn next_cycle_reset_at(reset_day: i64, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let reset_day = u32::try_from(reset_day).ok()?;
+    let this_month = Utc
+        .with_ymd_and_hms(now.year(), now.month(), reset_day, 0, 0, 0)
+        .single()?;
+    if this_month > now {
+        return Some(this_month);
+    }
+    let (year, month) = if now.month() == 12 {
+        (now.year() + 1, 1)
+    } else {
+        (now.year(), now.month() + 1)
+    };
+    Utc.with_ymd_and_hms(year, month, reset_day, 0, 0, 0)
+        .single()
 }
 
 fn round4(value: f64) -> f64 {
@@ -155,5 +183,59 @@ mod tests {
         );
         assert_eq!(price.channel_id, Some(7));
         assert_eq!(price.input_price_per_1k, 9.0);
+    }
+
+    #[test]
+    fn fire_sale_requires_remaining_threshold_and_reset_window() {
+        let mut channel = test_channel();
+
+        assert!(is_fire_sale_at(
+            &channel,
+            Utc.with_ymd_and_hms(2026, 5, 26, 12, 0, 0).unwrap()
+        ));
+        assert!(!is_fire_sale_at(
+            &channel,
+            Utc.with_ymd_and_hms(2026, 5, 24, 0, 0, 0).unwrap()
+        ));
+        assert!(!is_fire_sale_at(
+            &channel,
+            Utc.with_ymd_and_hms(2026, 5, 28, 0, 0, 0).unwrap()
+        ));
+
+        channel.limits.used_cycle_tokens = 800;
+        assert!(!is_fire_sale_at(
+            &channel,
+            Utc.with_ymd_and_hms(2026, 5, 26, 12, 0, 0).unwrap()
+        ));
+    }
+
+    fn test_channel() -> Channel {
+        Channel {
+            id: 1,
+            owner_user_id: 1,
+            name: "test".to_string(),
+            provider: crate::models::ProviderKind::OpenAi,
+            base_url: "http://example.test".to_string(),
+            api_key_secret: "secret".to_string(),
+            models: vec!["*".to_string()],
+            enabled: true,
+            status: "healthy".to_string(),
+            health_checked_at: None,
+            upstream_latency_ms: None,
+            last_error: None,
+            limits: crate::models::ChannelLimits {
+                cycle_limit_tokens: 1000,
+                cycle_reset_day: 28,
+                daily_limit_tokens: 1000,
+                hourly_limit_tokens: 1000,
+                used_cycle_tokens: 100,
+                used_day_tokens: 0,
+                used_hour_tokens: 0,
+                fire_sale_days_before: 3,
+                fire_sale_remaining_pct: 0.25,
+                fire_sale_discount: 0.2,
+                provider_share: 0.7,
+            },
+        }
     }
 }
