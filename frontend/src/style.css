@@ -199,9 +199,10 @@ caption {
   width: min(46vw, 620px);
   aspect-ratio: 4 / 3;
   content: "";
-  background: url("/altar-relief.svg") center / cover no-repeat;
-  opacity: 0.22;
+  background: url("/tokenaltar-background.png") center / cover no-repeat;
+  opacity: 0.26;
   filter: saturate(0.75);
+  mask-image: radial-gradient(circle at 52% 54%, #000 0 46%, transparent 76%);
   pointer-events: none;
 }
 
@@ -380,8 +381,9 @@ caption {
   border-radius: 8px;
   padding: 44px;
   background:
-    linear-gradient(90deg, rgba(247, 240, 227, 0.94), rgba(247, 240, 227, 0.72) 42%, rgba(44, 31, 20, 0.18)),
-    url("/altar-relief.svg") right center / auto 105% no-repeat,
+    linear-gradient(90deg, rgba(247, 240, 227, 0.96), rgba(247, 240, 227, 0.82) 39%, rgba(31, 18, 13, 0.14)),
+    linear-gradient(180deg, rgba(255, 248, 226, 0.08), rgba(31, 18, 13, 0.18)),
+    url("/tokenaltar-background.png") center / cover no-repeat,
     #f5eddd;
   box-shadow: var(--shadow);
 }
@@ -487,8 +489,9 @@ caption {
   width: 360px;
   height: 100%;
   content: "";
-  background: url("/altar-relief.svg") right center / cover no-repeat;
-  opacity: 0.11;
+  background: url("/tokenaltar-background.png") right center / cover no-repeat;
+  opacity: 0.13;
+  mask-image: linear-gradient(90deg, transparent, #000 38%);
   pointer-events: none;
 }
 

@@ -17,3 +17,9 @@
 - **Status:** Completed
 - **Next Steps:** Review with real production channel/ledger data to tune table density if rows become very wide.
 - **Context:** Verified with `pnpm --dir frontend build` plus Playwright desktop/mobile login and dashboard/channel screenshots against a temporary local backend.
+
+## [2026-05-18 14:28] Oil Painting Background Asset
+- **Changes:** Moved the generated `image.png` into `frontend/public/tokenaltar-background.png` and wired it into the login hero, ambient shell artwork, and page header background treatments.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** Rebuilt the frontend and checked login/dashboard desktop and mobile rendering with Playwright against a temporary local backend.
