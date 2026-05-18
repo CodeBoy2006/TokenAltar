@@ -38,6 +38,7 @@ pub struct AuthResponse {
 #[derive(Debug, Deserialize)]
 pub struct CreateApiKeyRequest {
     pub name: String,
+    pub enabled: Option<bool>,
     pub spend_limit_points: Option<f64>,
     pub allowed_models: Option<Vec<String>>,
     pub expires_at: Option<String>,
@@ -157,10 +158,11 @@ pub async fn create_api_key(
         .db
         .create_api_key(auth.user.id, &request.name, request.spend_limit_points)
         .await?;
-    if request.allowed_models.is_some() || request.expires_at.is_some() {
+    if request.enabled.is_some() || request.allowed_models.is_some() || request.expires_at.is_some()
+    {
         let update = ApiKeyUpdateInput {
             name: record.name.clone(),
-            enabled: record.enabled,
+            enabled: request.enabled.unwrap_or(record.enabled),
             spend_limit_points: record.spend_limit_points,
             expires_at: request.expires_at,
             allowed_models: request.allowed_models.unwrap_or_default(),

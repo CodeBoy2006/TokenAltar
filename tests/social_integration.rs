@@ -261,6 +261,37 @@ async fn api_key_management_updates_rotates_and_soft_deletes_keys() {
         .clone()
         .oneshot(
             axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/api-keys")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::from(
+                    json!({
+                        "name": "staged-client",
+                        "enabled": false,
+                        "spend_limit_points": 7,
+                        "expires_at": null,
+                        "allowed_models": ["gpt-4o*"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: Value = serde_json::from_slice(&body).unwrap();
+    let created_id = created["record"]["id"].as_i64().unwrap();
+    assert_eq!(created["record"]["enabled"], false);
+    assert_eq!(created["record"]["allowed_models"][0], "gpt-4o*");
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
                 .method("PATCH")
                 .uri(format!("/api/api-keys/{}", record.id))
                 .header("content-type", "application/json")
@@ -322,6 +353,7 @@ async fn api_key_management_updates_rotates_and_soft_deletes_keys() {
     );
 
     let response = app
+        .clone()
         .oneshot(
             axum::http::Request::builder()
                 .method("DELETE")
@@ -340,6 +372,29 @@ async fn api_key_management_updates_rotates_and_soft_deletes_keys() {
             .await
             .is_err()
     );
+    assert!(
+        state
+            .db
+            .list_api_keys(alice.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|item| item.id != record.id)
+    );
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/api-keys/batch-delete")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::from(json!({ "ids": [created_id] }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(state.db.list_api_keys(alice.id).await.unwrap().is_empty());
 }
 
