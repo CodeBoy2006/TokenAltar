@@ -5,12 +5,13 @@ It serves an operational Vue console and OpenAI/Anthropic-compatible gateway end
 
 ## MVP Features
 
-- `POST /v1/responses` and `POST /v1/messages` with local API-key authentication.
-- OpenAI Responses and Anthropic Messages adapters through a shared internal chat format.
-- SQLite WAL persistence for users, API keys, channels, pricing, affinity rules, bindings, and ledger entries.
+- `POST /v1/chat/completions`, `POST /v1/responses`, and `POST /v1/messages` with local API-key authentication.
+- OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages adapters through a shared internal chat format.
+- Local tiktoken precheck for OpenAI models, with a deterministic Anthropic proxy estimate and final settlement from upstream `usage`.
+- SQLite WAL persistence for users, API keys, channels, pricing, affinity rules, bindings, social economy, and ledger entries.
 - In-memory routing state for cooldowns, surge metrics, and LRU affinity cache.
 - MPSC ledger queue so gateway requests avoid synchronous high-frequency accounting writes.
-- Vue console for login, API keys, channels, model prices, affinity rules, dashboard, and ledger.
+- Vue console for login/register, API keys, channels, model prices, affinity rules, dashboard, ledger, settings, transfers, red packets, and leaderboards.
 
 ## Run
 
@@ -38,3 +39,20 @@ Console sessions use `Authorization: Bearer ta-...`.
 
 MVP protocol conversion supports text messages, `system`, `temperature`, max token controls, and basic tool/function fields.
 Images, files, and reasoning/thinking extensions are rejected or left for same-protocol future work.
+
+## Operational Notes
+
+- Channel token windows are refreshed on startup, dashboard/channel reads, and gateway requests.
+- Channel status moves to `monthly_exhausted` or `cooling` when cycle/day/hour buckets are exceeded.
+- Invite-gated registration is controlled by `invite_required` and `invite_code_default` in the Settings tab.
+- Red packet claims are transaction guarded with unique `(packet, user)` claims.
+- Leaderboards mask users that enable anonymous ranking.
+
+## Verify
+
+```bash
+cargo test
+cargo clippy -- -D warnings
+pnpm --dir frontend build
+cargo build --release
+```
