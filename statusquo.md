@@ -11,3 +11,9 @@
 - **Status:** Completed
 - **Next Steps:** Configure production upstream channels and run an external-provider smoke test with real API keys.
 - **Context:** Multimodal and reasoning/thinking payloads remain intentionally outside the text/tool MVP boundary; Anthropic local precheck uses the documented proxy estimator while settlement uses returned usage.
+
+## [2026-05-18 14:14] Neoclassical Console Redesign
+- **Changes:** Reworked the Vue console into a neoclassical control surface, added typed tab metadata and dashboard metric cards, replaced the global visual system with stone/gold/bronze accented responsive layouts, and added `frontend/public/altar-relief.svg` as a local decorative relief asset.
+- **Status:** Completed
+- **Next Steps:** Review with real production channel/ledger data to tune table density if rows become very wide.
+- **Context:** Verified with `pnpm --dir frontend build` plus Playwright desktop/mobile login and dashboard/channel screenshots against a temporary local backend.
