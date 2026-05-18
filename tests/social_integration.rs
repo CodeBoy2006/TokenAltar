@@ -4,6 +4,7 @@ use tokenaltar::{
     app::{AppState, build_router},
     config::Config,
     db::{ChannelInput, LeaderboardPeriod},
+    models::{GatewayReservation, LedgerEvent, ModelPrice, Usage},
 };
 use tower::ServiceExt;
 
@@ -239,6 +240,162 @@ async fn users_create_channels_and_list_only_their_masked_channels() {
     assert_eq!(channels[0]["name"], "alice-pool");
     assert_ne!(channels[0]["id"], bob_channel.id);
     assert!(channels[0].get("api_key_secret").is_none());
+}
+
+#[tokio::test]
+async fn gateway_reservation_can_be_released_without_leaking_usage() {
+    let state = setup_state().await;
+    let alice = state
+        .db
+        .create_user(
+            "reserve-release@example.com",
+            "password123",
+            "ReserveRelease",
+        )
+        .await
+        .unwrap();
+    let (_, api_key) = state
+        .db
+        .create_api_key(alice.id, "reserve", Some(10.0))
+        .await
+        .unwrap();
+
+    let reservation = state
+        .db
+        .reserve_gateway_request(alice.id, api_key.id, 1, 25, 2.5)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.db.get_user(alice.id).await.unwrap().points_balance,
+        997.5
+    );
+    assert_eq!(
+        state.db.get_api_key(api_key.id).await.unwrap().spent_points,
+        2.5
+    );
+    assert_eq!(
+        state
+            .db
+            .get_channel(1)
+            .await
+            .unwrap()
+            .limits
+            .used_cycle_tokens,
+        25
+    );
+
+    state
+        .db
+        .release_gateway_reservation(&reservation)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.db.get_user(alice.id).await.unwrap().points_balance,
+        1000.0
+    );
+    assert_eq!(
+        state.db.get_api_key(api_key.id).await.unwrap().spent_points,
+        0.0
+    );
+    assert_eq!(
+        state
+            .db
+            .get_channel(1)
+            .await
+            .unwrap()
+            .limits
+            .used_cycle_tokens,
+        0
+    );
+}
+
+#[tokio::test]
+async fn ledger_settlement_applies_only_reservation_delta() {
+    let state = setup_state().await;
+    let provider = state
+        .db
+        .find_user_with_hash("admin@example.com")
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let consumer = state
+        .db
+        .create_user("reserve-delta@example.com", "password123", "ReserveDelta")
+        .await
+        .unwrap();
+    let (_, api_key) = state
+        .db
+        .create_api_key(consumer.id, "reserve", Some(10.0))
+        .await
+        .unwrap();
+    let reservation = state
+        .db
+        .reserve_gateway_request(consumer.id, api_key.id, 1, 10, 1.0)
+        .await
+        .unwrap();
+
+    state
+        .db
+        .apply_ledger_event(&LedgerEvent {
+            request_id: "req_reservation_delta".to_string(),
+            user_id: consumer.id,
+            api_key_id: api_key.id,
+            channel_id: 1,
+            provider_user_id: provider.id,
+            model: "gpt-test".to_string(),
+            tokenizer: "test".to_string(),
+            usage: Usage {
+                input_tokens: 12,
+                output_tokens: 0,
+                cache_tokens: 0,
+            },
+            price: ModelPrice {
+                channel_id: None,
+                model_pattern: "default".to_string(),
+                input_price_per_1k: 1.0,
+                output_price_per_1k: 3.0,
+                cache_price_per_1k: 0.2,
+            },
+            surge_multiplier: 1.0,
+            fire_sale_discount: 1.0,
+            total_points: 1.5,
+            provider_points: 0.6,
+            status: "success".to_string(),
+            formula_note: "test".to_string(),
+            reservation: GatewayReservation {
+                user_id: consumer.id,
+                api_key_id: api_key.id,
+                channel_id: 1,
+                points: reservation.points,
+                tokens: reservation.tokens,
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state.db.get_user(consumer.id).await.unwrap().points_balance,
+        998.5
+    );
+    assert_eq!(
+        state.db.get_user(provider.id).await.unwrap().points_balance,
+        1_000_000.6
+    );
+    assert_eq!(
+        state.db.get_api_key(api_key.id).await.unwrap().spent_points,
+        1.5
+    );
+    assert_eq!(
+        state
+            .db
+            .get_channel(1)
+            .await
+            .unwrap()
+            .limits
+            .used_cycle_tokens,
+        12
+    );
 }
 
 #[tokio::test]

@@ -14,8 +14,8 @@ use crate::{
     auth::{generate_token, hash_password, hash_token},
     error::{AppError, AppResult},
     models::{
-        AffinityRule, ApiKeyRecord, Channel, ChannelLimits, LedgerEvent, ModelPrice, PublicChannel,
-        User, json_array_to_strings,
+        AffinityRule, ApiKeyRecord, Channel, ChannelLimits, GatewayReservation, LedgerEvent,
+        ModelPrice, PublicChannel, User, json_array_to_strings,
     },
 };
 
@@ -381,6 +381,128 @@ impl Database {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    pub async fn reserve_gateway_request(
+        &self,
+        user_id: i64,
+        api_key_id: i64,
+        channel_id: i64,
+        tokens: i64,
+        points: f64,
+    ) -> AppResult<GatewayReservation> {
+        if tokens <= 0 || points < 0.0 || !points.is_finite() {
+            return Err(AppError::BadRequest(
+                "invalid gateway reservation".to_string(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        let user_debit = sqlx::query(
+            "UPDATE users SET points_balance = points_balance - ? WHERE id = ? AND points_balance >= ?",
+        )
+        .bind(points)
+        .bind(user_id)
+        .bind(points)
+        .execute(&mut *tx)
+        .await?;
+        if user_debit.rows_affected() == 0 {
+            return Err(AppError::BadRequest(
+                "insufficient points for estimated input tokens".to_string(),
+            ));
+        }
+
+        let key_debit = sqlx::query(
+            r#"
+            UPDATE api_keys
+            SET spent_points = spent_points + ?, updated_at = datetime('now')
+            WHERE id = ? AND user_id = ? AND enabled = 1 AND deleted_at IS NULL
+              AND (expires_at IS NULL OR expires_at > datetime('now'))
+              AND (spend_limit_points IS NULL OR spent_points + ? <= spend_limit_points)
+            "#,
+        )
+        .bind(points)
+        .bind(api_key_id)
+        .bind(user_id)
+        .bind(points)
+        .execute(&mut *tx)
+        .await?;
+        if key_debit.rows_affected() == 0 {
+            return Err(AppError::BadRequest(
+                "api key spend limit would be exceeded".to_string(),
+            ));
+        }
+
+        let channel_debit = sqlx::query(
+            r#"
+            UPDATE channel_limits
+            SET used_cycle_tokens = used_cycle_tokens + ?,
+                used_day_tokens = used_day_tokens + ?,
+                used_hour_tokens = used_hour_tokens + ?,
+                updated_at = datetime('now')
+            WHERE channel_id = ?
+              AND used_cycle_tokens + ? <= cycle_limit_tokens
+              AND used_day_tokens + ? <= daily_limit_tokens
+              AND used_hour_tokens + ? <= hourly_limit_tokens
+            "#,
+        )
+        .bind(tokens)
+        .bind(tokens)
+        .bind(tokens)
+        .bind(channel_id)
+        .bind(tokens)
+        .bind(tokens)
+        .bind(tokens)
+        .execute(&mut *tx)
+        .await?;
+        if channel_debit.rows_affected() == 0 {
+            return Err(AppError::BadRequest(
+                "channel token quota no longer has enough room for the estimate".to_string(),
+            ));
+        }
+
+        tx.commit().await?;
+        Ok(GatewayReservation {
+            user_id,
+            api_key_id,
+            channel_id,
+            points,
+            tokens,
+        })
+    }
+
+    pub async fn release_gateway_reservation(
+        &self,
+        reservation: &GatewayReservation,
+    ) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE users SET points_balance = points_balance + ? WHERE id = ?")
+            .bind(reservation.points)
+            .bind(reservation.user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE api_keys SET spent_points = MAX(0, spent_points - ?) WHERE id = ?")
+            .bind(reservation.points)
+            .bind(reservation.api_key_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            r#"
+            UPDATE channel_limits
+            SET used_cycle_tokens = MAX(0, used_cycle_tokens - ?),
+                used_day_tokens = MAX(0, used_day_tokens - ?),
+                used_hour_tokens = MAX(0, used_hour_tokens - ?),
+                updated_at = datetime('now')
+            WHERE channel_id = ?
+            "#,
+        )
+        .bind(reservation.tokens)
+        .bind(reservation.tokens)
+        .bind(reservation.tokens)
+        .bind(reservation.channel_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -986,7 +1108,7 @@ impl Database {
 
     pub async fn apply_ledger_event(&self, event: &LedgerEvent) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        let inserted = sqlx::query(
             r#"
             INSERT OR IGNORE INTO ledger_entries(
               request_id, user_id, api_key_id, channel_id, provider_user_id, model, tokenizer,
@@ -1017,8 +1139,14 @@ impl Database {
         .bind(&event.formula_note)
         .execute(&mut *tx)
         .await?;
+        if inserted.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        let point_delta = event.total_points - event.reservation.points;
         sqlx::query("UPDATE users SET points_balance = points_balance - ? WHERE id = ?")
-            .bind(event.total_points)
+            .bind(point_delta)
             .bind(event.user_id)
             .execute(&mut *tx)
             .await?;
@@ -1027,17 +1155,25 @@ impl Database {
             .bind(event.provider_user_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE api_keys SET spent_points = spent_points + ? WHERE id = ?")
-            .bind(event.total_points)
+        sqlx::query("UPDATE api_keys SET spent_points = MAX(0, spent_points + ?) WHERE id = ?")
+            .bind(point_delta)
             .bind(event.api_key_id)
             .execute(&mut *tx)
             .await?;
+        let token_delta = event.usage.total() - event.reservation.tokens;
         sqlx::query(
-            "UPDATE channel_limits SET used_cycle_tokens = used_cycle_tokens + ?, used_day_tokens = used_day_tokens + ?, used_hour_tokens = used_hour_tokens + ?, updated_at = datetime('now') WHERE channel_id = ?",
+            r#"
+            UPDATE channel_limits
+            SET used_cycle_tokens = MAX(0, used_cycle_tokens + ?),
+                used_day_tokens = MAX(0, used_day_tokens + ?),
+                used_hour_tokens = MAX(0, used_hour_tokens + ?),
+                updated_at = datetime('now')
+            WHERE channel_id = ?
+            "#,
         )
-        .bind(event.usage.total())
-        .bind(event.usage.total())
-        .bind(event.usage.total())
+        .bind(token_delta)
+        .bind(token_delta)
+        .bind(token_delta)
         .bind(event.channel_id)
         .execute(&mut *tx)
         .await?;
@@ -1183,11 +1319,13 @@ impl Database {
             ));
         }
         let mut tx = self.pool.begin().await?;
-        let balance: f64 = sqlx::query_scalar("SELECT points_balance FROM users WHERE id = ?")
+        let from_exists: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE id = ?")
             .bind(from_user_id)
             .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(AppError::NotFound)?;
+            .await?;
+        if from_exists.is_none() {
+            return Err(AppError::NotFound);
+        }
         let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE id = ?")
             .bind(to_user_id)
             .fetch_optional(&mut *tx)
@@ -1195,14 +1333,17 @@ impl Database {
         if exists.is_none() {
             return Err(AppError::NotFound);
         }
-        if balance < points {
-            return Err(AppError::BadRequest("insufficient points".to_string()));
-        }
-        sqlx::query("UPDATE users SET points_balance = points_balance - ? WHERE id = ?")
+        let debit = sqlx::query(
+            "UPDATE users SET points_balance = points_balance - ? WHERE id = ? AND points_balance >= ?",
+        )
             .bind(points)
             .bind(from_user_id)
+            .bind(points)
             .execute(&mut *tx)
             .await?;
+        if debit.rows_affected() == 0 {
+            return Err(AppError::BadRequest("insufficient points".to_string()));
+        }
         sqlx::query("UPDATE users SET points_balance = points_balance + ? WHERE id = ?")
             .bind(points)
             .bind(to_user_id)

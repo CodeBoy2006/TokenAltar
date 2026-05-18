@@ -18,7 +18,7 @@ use crate::{
     app::AppState,
     auth::GatewayAuth,
     error::{AppError, AppResult},
-    models::{GatewayContext, LedgerEvent, ProviderKind, Usage},
+    models::{GatewayContext, GatewayReservation, LedgerEvent, ProviderKind, Usage},
     pricing::{fire_sale_discount, select_price, settle},
     protocol::{
         ClientProtocol, ProviderProtocol, client_response_body, extract_usage,
@@ -197,18 +197,36 @@ async fn handle_gateway(
     );
     let selected_reserve = token_estimate.tokens as f64 * price.input_price_per_1k / 1000.0;
     ensure_affordable(&auth.user, &api_key, selected_reserve)?;
+    let reservation = state
+        .db
+        .reserve_gateway_request(
+            auth.user.id,
+            api_key.id,
+            decision.channel.id,
+            token_estimate.tokens,
+            selected_reserve,
+        )
+        .await?;
 
     let request_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-    let upstream = send_upstream(
+    let upstream = match send_upstream(
         &state,
         &decision,
         endpoint.client_protocol,
         &raw_body,
         &request,
     )
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            state.db.release_gateway_reservation(&reservation).await?;
+            return Err(err);
+        }
+    };
 
     if upstream.status() == StatusCode::TOO_MANY_REQUESTS {
+        state.db.release_gateway_reservation(&reservation).await?;
         state
             .router_state
             .mark_cooldown(decision.channel.id, Duration::from_secs(30))
@@ -224,14 +242,36 @@ async fn handle_gateway(
             &request.model,
             &state.db.price_book_for_channel(retry.channel.id).await?,
         );
-        let retry_response = send_upstream(
+        let retry_reserve = token_estimate.tokens as f64 * retry_price.input_price_per_1k / 1000.0;
+        ensure_affordable(&auth.user, &api_key, retry_reserve)?;
+        let retry_reservation = state
+            .db
+            .reserve_gateway_request(
+                auth.user.id,
+                api_key.id,
+                retry.channel.id,
+                token_estimate.tokens,
+                retry_reserve,
+            )
+            .await?;
+        let retry_response = match send_upstream(
             &state,
             &retry,
             endpoint.client_protocol,
             &raw_body,
             &request,
         )
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                state
+                    .db
+                    .release_gateway_reservation(&retry_reservation)
+                    .await?;
+                return Err(err);
+            }
+        };
         return finish_response(
             FinishContext {
                 state,
@@ -242,6 +282,7 @@ async fn handle_gateway(
                 client_protocol: endpoint.client_protocol,
                 request_id,
                 price: retry_price,
+                reservation: retry_reservation,
             },
             retry_response,
         )
@@ -258,6 +299,7 @@ async fn handle_gateway(
             client_protocol: endpoint.client_protocol,
             request_id,
             price,
+            reservation,
         },
         upstream,
     )
@@ -454,6 +496,7 @@ struct FinishContext {
     client_protocol: ClientProtocol,
     request_id: String,
     price: crate::models::ModelPrice,
+    reservation: GatewayReservation,
 }
 
 struct LedgerContext<'a> {
@@ -464,6 +507,7 @@ struct LedgerContext<'a> {
     request: &'a crate::protocol::TextRequest,
     request_id: &'a str,
     price: crate::models::ModelPrice,
+    reservation: &'a GatewayReservation,
 }
 
 async fn finish_response(
@@ -476,10 +520,26 @@ async fn finish_response(
     }
 
     let provider_protocol = provider_protocol(&finish.decision.channel.provider);
-    let value = upstream
-        .json::<Value>()
-        .await
-        .map_err(|err| AppError::Upstream(err.to_string()))?;
+    if !status.is_success() {
+        finish
+            .state
+            .db
+            .release_gateway_reservation(&finish.reservation)
+            .await?;
+    }
+    let value = match upstream.json::<Value>().await {
+        Ok(value) => value,
+        Err(err) => {
+            if status.is_success() {
+                finish
+                    .state
+                    .db
+                    .release_gateway_reservation(&finish.reservation)
+                    .await?;
+            }
+            return Err(AppError::Upstream(err.to_string()));
+        }
+    };
     if !status.is_success() {
         return Ok((status, Json(value)).into_response());
     }
@@ -489,7 +549,7 @@ async fn finish_response(
 }
 
 async fn settle_success(finish: &FinishContext, usage: Usage) -> AppResult<()> {
-    enqueue_ledger(
+    if let Err(err) = enqueue_ledger(
         LedgerContext {
             state: &finish.state,
             auth: &finish.auth,
@@ -498,11 +558,20 @@ async fn settle_success(finish: &FinishContext, usage: Usage) -> AppResult<()> {
             request: &finish.request,
             request_id: &finish.request_id,
             price: finish.price.clone(),
+            reservation: &finish.reservation,
         },
         normalized_usage(&finish.request, usage),
         "success",
     )
-    .await?;
+    .await
+    {
+        finish
+            .state
+            .db
+            .release_gateway_reservation(&finish.reservation)
+            .await?;
+        return Err(err);
+    }
     if let Some(hit) = &finish.decision.affinity_hit
         && hit.rule.switch_on_success
     {
@@ -523,6 +592,13 @@ async fn finish_streaming_response(
 ) -> AppResult<Response> {
     let status = upstream.status();
     let provider_protocol = provider_protocol(&finish.decision.channel.provider);
+    if !status.is_success() {
+        finish
+            .state
+            .db
+            .release_gateway_reservation(&finish.reservation)
+            .await?;
+    }
     let mut stream = upstream.bytes_stream();
     let mut usage = Usage {
         input_tokens: 0,
@@ -550,30 +626,38 @@ async fn finish_streaming_response(
                 }
             }
         }
-        let final_usage = normalized_usage(&finish_for_stream.request, usage.clone());
-        let _ = enqueue_ledger(
-            LedgerContext {
-                state: &finish_for_stream.state,
-                auth: &finish_for_stream.auth,
-                api_key: &finish_for_stream.api_key,
-                decision: &finish_for_stream.decision,
-                request: &finish_for_stream.request,
-                request_id: &finish_for_stream.request_id,
-                price: finish_for_stream.price.clone(),
-            },
-            final_usage,
-            if status.is_success() { "success" } else { "upstream_error" },
-        ).await;
-        if status.is_success()
-            && let Some(hit) = &finish_for_stream.decision.affinity_hit
-            && hit.rule.switch_on_success
-        {
-            let _ = remember_affinity(
-                &finish_for_stream.state.db,
-                &finish_for_stream.state.affinity_cache,
-                hit,
-                finish_for_stream.decision.channel.id,
-            ).await;
+        if status.is_success() {
+            let final_usage = normalized_usage(&finish_for_stream.request, usage.clone());
+            if enqueue_ledger(
+                LedgerContext {
+                    state: &finish_for_stream.state,
+                    auth: &finish_for_stream.auth,
+                    api_key: &finish_for_stream.api_key,
+                    decision: &finish_for_stream.decision,
+                    request: &finish_for_stream.request,
+                    request_id: &finish_for_stream.request_id,
+                    price: finish_for_stream.price.clone(),
+                    reservation: &finish_for_stream.reservation,
+                },
+                final_usage,
+                "success",
+            ).await.is_err() {
+                let _ = finish_for_stream
+                    .state
+                    .db
+                    .release_gateway_reservation(&finish_for_stream.reservation)
+                    .await;
+            }
+            if let Some(hit) = &finish_for_stream.decision.affinity_hit
+                && hit.rule.switch_on_success
+            {
+                let _ = remember_affinity(
+                    &finish_for_stream.state.db,
+                    &finish_for_stream.state.affinity_cache,
+                    hit,
+                    finish_for_stream.decision.channel.id,
+                ).await;
+            }
         }
     };
 
@@ -612,6 +696,7 @@ async fn enqueue_ledger(ctx: LedgerContext<'_>, usage: Usage, status: &str) -> A
         provider_points: settlement.provider_points,
         status: status.to_string(),
         formula_note: settlement.formula_note,
+        reservation: ctx.reservation.clone(),
     };
     ctx.state
         .ledger_tx

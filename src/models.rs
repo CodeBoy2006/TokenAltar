@@ -178,6 +178,16 @@ pub struct LedgerEvent {
     pub provider_points: f64,
     pub status: String,
     pub formula_note: String,
+    pub reservation: GatewayReservation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayReservation {
+    pub user_id: i64,
+    pub api_key_id: i64,
+    pub channel_id: i64,
+    pub points: f64,
+    pub tokens: i64,
 }
 
 #[derive(Debug, Clone)]

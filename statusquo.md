@@ -83,3 +83,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Surge pricing now bases its load ratio on recent gateway settlements instead of all settlements since process start.
+
+## [2026-05-18 22:41] Gateway Reservation Safety
+- **Changes:** Added atomic gateway request reservations for estimated points and channel tokens, released reservations on upstream failure, settled only final deltas, guarded duplicate ledger side effects, and made P2P transfer debits conditional on available balance.
+- **Status:** Completed
+- **Next Steps:** Consider moving reservation state to a durable recovery table if the process must survive crashes between reserve and settlement.
+- **Context:** Existing gateway integration tests pass; new tests cover reservation release and settlement delta accounting.
