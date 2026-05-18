@@ -1,9 +1,9 @@
 :root {
   color: #1f2933;
-  background: #f6f7f9;
+  background: #f5f7fa;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 16px;
+  font-size: 15px;
   letter-spacing: 0;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -27,13 +27,14 @@ select {
 }
 
 button {
-  min-height: 36px;
-  border: 1px solid #1b5e5a;
-  background: #1b5e5a;
+  min-height: 34px;
+  border: 1px solid #155e63;
+  background: #155e63;
   color: #fff;
   border-radius: 6px;
-  padding: 0 14px;
+  padding: 0 13px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 button:disabled {
@@ -42,14 +43,20 @@ button:disabled {
 }
 
 button.ghost {
+  background: #fff;
+  color: #155e63;
+}
+
+button.light {
   background: transparent;
-  color: #1b5e5a;
+  color: #d9e2ec;
+  border-color: #486581;
 }
 
 input,
 select {
   width: 100%;
-  min-height: 36px;
+  min-height: 34px;
   border: 1px solid #d5dae1;
   border-radius: 6px;
   padding: 7px 9px;
@@ -61,11 +68,12 @@ label {
   display: grid;
   gap: 6px;
   color: #52606d;
-  font-size: 0.88rem;
+  font-size: 0.86rem;
 }
 
 h1,
 h2,
+h3,
 p {
   margin: 0;
 }
@@ -79,19 +87,40 @@ h2 {
   color: #102a43;
 }
 
+h3 {
+  font-size: 1rem;
+  color: #102a43;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86rem;
+  background: #eef2f7;
+  border: 1px solid #d9e2ec;
+  border-radius: 5px;
+  padding: 3px 6px;
+}
+
+caption {
+  text-align: left;
+  color: #52606d;
+  padding: 0 0 8px;
+  font-weight: 700;
+}
+
 .shell {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 248px 1fr;
 }
 
 .sidebar {
   background: #102a43;
   color: #d9e2ec;
-  padding: 24px;
+  padding: 22px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 22px;
 }
 
 .brand {
@@ -101,9 +130,16 @@ h2 {
 }
 
 .brand p,
+.account span,
+.muted,
+.toolbar p {
+  color: #627d98;
+  font-size: 0.86rem;
+}
+
+.sidebar .brand p,
 .account span {
   color: #bcccdc;
-  font-size: 0.85rem;
 }
 
 .mark {
@@ -119,7 +155,7 @@ h2 {
 
 .tabs {
   display: grid;
-  gap: 8px;
+  gap: 7px;
 }
 
 .tabs button {
@@ -142,23 +178,52 @@ h2 {
 }
 
 .content {
-  padding: 28px;
+  padding: 26px;
   overflow: auto;
 }
 
-.login-panel,
 section {
-  max-width: 1180px;
+  max-width: 1240px;
 }
 
-.login-panel {
-  width: 420px;
+.auth-panel {
+  min-height: calc(100vh - 52px);
+  display: grid;
+  place-items: center;
+}
+
+.auth-card,
+.panel {
   background: #fff;
   border: 1px solid #d9e2ec;
   border-radius: 8px;
-  padding: 24px;
+  padding: 18px;
+}
+
+.auth-card {
+  width: 420px;
   display: grid;
-  gap: 16px;
+  gap: 14px;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid #d9e2ec;
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.segmented button {
+  border: 0;
+  border-radius: 0;
+  background: #fff;
+  color: #52606d;
+}
+
+.segmented button.active {
+  background: #155e63;
+  color: #fff;
 }
 
 .toolbar {
@@ -182,7 +247,7 @@ section {
   padding: 18px;
   display: grid;
   gap: 6px;
-  min-height: 112px;
+  min-height: 104px;
 }
 
 .metric-grid span,
@@ -192,20 +257,45 @@ section {
 }
 
 .metric-grid strong {
-  font-size: 1.45rem;
+  font-size: 1.38rem;
   color: #102a43;
+  text-transform: capitalize;
+}
+
+.endpoint-strip {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 16px;
 }
 
 .form-row,
-.form-grid {
+.form-grid,
+.two-col,
+.table-pair {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 18px;
 }
 
-.form-grid.compact {
+.form-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.form-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.form-grid.compact,
+.two-col,
+.table-pair {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.form-stack {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
 }
 
 table {
@@ -225,6 +315,17 @@ td {
 
 tr:last-child td {
   border-bottom: 0;
+}
+
+.status {
+  display: inline-flex;
+  min-width: 92px;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #eef8f7;
+  color: #155e63;
+  font-size: 0.82rem;
 }
 
 .error,
@@ -247,7 +348,7 @@ tr:last-child td {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 860px) {
+@media (max-width: 960px) {
   .shell {
     grid-template-columns: 1fr;
   }
@@ -259,7 +360,9 @@ tr:last-child td {
   .metric-grid,
   .form-row,
   .form-grid,
-  .form-grid.compact {
+  .form-grid.compact,
+  .two-col,
+  .table-pair {
     grid-template-columns: 1fr;
   }
 
@@ -267,7 +370,7 @@ tr:last-child td {
     padding: 18px;
   }
 
-  .login-panel {
+  .auth-card {
     width: 100%;
   }
 }
