@@ -1,6 +1,7 @@
 use std::{str::FromStr, time::Duration};
 
 use chrono::{DateTime, Datelike, Utc};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{
@@ -655,6 +656,260 @@ impl Database {
         tx.commit().await?;
         Ok(())
     }
+
+    pub async fn set_anonymous_leaderboard(&self, user_id: i64, enabled: bool) -> AppResult<User> {
+        sqlx::query("UPDATE users SET anonymous_leaderboard = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(if enabled { 1 } else { 0 })
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        self.get_user(user_id).await
+    }
+
+    pub async fn transfer_points(
+        &self,
+        from_user_id: i64,
+        to_user_id: i64,
+        points: f64,
+        memo: Option<&str>,
+    ) -> AppResult<()> {
+        if from_user_id == to_user_id {
+            return Err(AppError::BadRequest("cannot transfer to yourself".to_string()));
+        }
+        if points <= 0.0 {
+            return Err(AppError::BadRequest("transfer points must be positive".to_string()));
+        }
+        let mut tx = self.pool.begin().await?;
+        let balance: f64 = sqlx::query_scalar("SELECT points_balance FROM users WHERE id = ?")
+            .bind(from_user_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE id = ?")
+            .bind(to_user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if exists.is_none() {
+            return Err(AppError::NotFound);
+        }
+        if balance < points {
+            return Err(AppError::BadRequest("insufficient points".to_string()));
+        }
+        sqlx::query("UPDATE users SET points_balance = points_balance - ? WHERE id = ?")
+            .bind(points)
+            .bind(from_user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE users SET points_balance = points_balance + ? WHERE id = ?")
+            .bind(points)
+            .bind(to_user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO transfers(from_user_id, to_user_id, points, memo) VALUES (?, ?, ?, ?)")
+            .bind(from_user_id)
+            .bind(to_user_id)
+            .bind(points)
+            .bind(memo)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_transfers(&self, user_id: i64) -> AppResult<Vec<serde_json::Value>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT t.id, t.from_user_id, t.to_user_id, t.points, t.memo, t.created_at,
+                   fu.display_name AS from_name, tu.display_name AS to_name
+            FROM transfers t
+            JOIN users fu ON fu.id = t.from_user_id
+            JOIN users tu ON tu.id = t.to_user_id
+            WHERE t.from_user_id = ? OR t.to_user_id = ?
+            ORDER BY t.id DESC LIMIT 100
+            "#,
+        )
+        .bind(user_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "id": row.get::<i64, _>("id"),
+                    "from_user_id": row.get::<i64, _>("from_user_id"),
+                    "to_user_id": row.get::<i64, _>("to_user_id"),
+                    "from_name": row.get::<String, _>("from_name"),
+                    "to_name": row.get::<String, _>("to_name"),
+                    "points": row.get::<f64, _>("points"),
+                    "memo": row.get::<Option<String>, _>("memo"),
+                    "created_at": row.get::<String, _>("created_at"),
+                })
+            })
+            .collect())
+    }
+
+    pub async fn create_red_packet(
+        &self,
+        creator_user_id: i64,
+        phrase: &str,
+        total_points: f64,
+        total_parts: i64,
+        mode: &str,
+    ) -> AppResult<()> {
+        if phrase.trim().len() < 3 {
+            return Err(AppError::BadRequest("phrase must be at least 3 characters".to_string()));
+        }
+        if total_points <= 0.0 || total_parts <= 0 {
+            return Err(AppError::BadRequest("red packet points and parts must be positive".to_string()));
+        }
+        if !matches!(mode, "even" | "lucky") {
+            return Err(AppError::BadRequest("mode must be even or lucky".to_string()));
+        }
+        let mut tx = self.pool.begin().await?;
+        let balance: f64 = sqlx::query_scalar("SELECT points_balance FROM users WHERE id = ?")
+            .bind(creator_user_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if balance < total_points {
+            return Err(AppError::BadRequest("insufficient points".to_string()));
+        }
+        sqlx::query("UPDATE users SET points_balance = points_balance - ? WHERE id = ?")
+            .bind(total_points)
+            .bind(creator_user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO red_packets(creator_user_id, phrase, total_points, remaining_points, total_parts, mode) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(creator_user_id)
+        .bind(phrase)
+        .bind(total_points)
+        .bind(total_points)
+        .bind(total_parts)
+        .bind(mode)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn claim_red_packet(&self, user_id: i64, phrase: &str) -> AppResult<f64> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT id, remaining_points, total_parts, claimed_parts, mode FROM red_packets WHERE phrase = ?",
+        )
+        .bind(phrase)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AppError::NotFound)?;
+        let packet_id: i64 = row.get("id");
+        let remaining_points: f64 = row.get("remaining_points");
+        let total_parts: i64 = row.get("total_parts");
+        let claimed_parts: i64 = row.get("claimed_parts");
+        let mode: String = row.get("mode");
+        let already: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM red_packet_claims WHERE red_packet_id = ? AND user_id = ?")
+                .bind(packet_id)
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if already.is_some() {
+            return Err(AppError::BadRequest("red packet already claimed".to_string()));
+        }
+        let remaining_parts = total_parts - claimed_parts;
+        if remaining_parts <= 0 || remaining_points <= 0.0 {
+            return Err(AppError::BadRequest("red packet exhausted".to_string()));
+        }
+        let points = if remaining_parts == 1 || mode == "even" {
+            remaining_points / remaining_parts as f64
+        } else {
+            let average = remaining_points / remaining_parts as f64;
+            let max = (average * 2.0).min(remaining_points - 0.0001);
+            rand::rng().random_range(0.0001..max)
+        };
+        let points = (points * 10000.0).floor() / 10000.0;
+        let result = sqlx::query(
+            "UPDATE red_packets SET remaining_points = remaining_points - ?, claimed_parts = claimed_parts + 1 WHERE id = ? AND claimed_parts < total_parts AND remaining_points >= ?",
+        )
+        .bind(points)
+        .bind(packet_id)
+        .bind(points)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::BadRequest("red packet exhausted".to_string()));
+        }
+        sqlx::query("INSERT INTO red_packet_claims(red_packet_id, user_id, points) VALUES (?, ?, ?)")
+            .bind(packet_id)
+            .bind(user_id)
+            .bind(points)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE users SET points_balance = points_balance + ? WHERE id = ?")
+            .bind(points)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(points)
+    }
+
+    pub async fn list_red_packets(&self, user_id: i64) -> AppResult<Vec<serde_json::Value>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, phrase, total_points, remaining_points, total_parts, claimed_parts, mode, created_at
+            FROM red_packets WHERE creator_user_id = ? ORDER BY id DESC LIMIT 100
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "id": row.get::<i64, _>("id"),
+                    "phrase": row.get::<String, _>("phrase"),
+                    "total_points": row.get::<f64, _>("total_points"),
+                    "remaining_points": row.get::<f64, _>("remaining_points"),
+                    "total_parts": row.get::<i64, _>("total_parts"),
+                    "claimed_parts": row.get::<i64, _>("claimed_parts"),
+                    "mode": row.get::<String, _>("mode"),
+                    "created_at": row.get::<String, _>("created_at"),
+                })
+            })
+            .collect())
+    }
+
+    pub async fn leaderboards(&self) -> AppResult<serde_json::Value> {
+        let providers = sqlx::query(
+            r#"
+            SELECT u.id, u.display_name, u.anonymous_leaderboard,
+                   COALESCE(SUM(l.input_tokens + l.output_tokens + l.cache_tokens), 0) AS score
+            FROM ledger_entries l JOIN users u ON u.id = l.provider_user_id
+            WHERE l.created_at >= date('now', 'start of month')
+            GROUP BY u.id ORDER BY score DESC LIMIT 20
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let consumers = sqlx::query(
+            r#"
+            SELECT u.id, u.display_name, u.anonymous_leaderboard,
+                   COALESCE(SUM(l.total_points), 0) AS score
+            FROM ledger_entries l JOIN users u ON u.id = l.user_id
+            WHERE l.created_at >= date('now', 'start of month')
+            GROUP BY u.id ORDER BY score DESC LIMIT 20
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(json!({
+            "providers": providers.iter().map(leaderboard_row).collect::<Vec<_>>(),
+            "consumers": consumers.iter().map(leaderboard_row).collect::<Vec<_>>(),
+        }))
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -757,6 +1012,23 @@ fn affinity_rule_from_row(row: &sqlx::sqlite::SqliteRow) -> AffinityRule {
         skip_retry_on_failure: row.get::<i64, _>("skip_retry_on_failure") != 0,
         switch_on_success: row.get::<i64, _>("switch_on_success") != 0,
     }
+}
+
+fn leaderboard_row(row: &sqlx::sqlite::SqliteRow) -> serde_json::Value {
+    let anonymous = row.get::<i64, _>("anonymous_leaderboard") != 0;
+    let id: i64 = row.get("id");
+    let score = row
+        .try_get::<f64, _>("score")
+        .unwrap_or_else(|_| row.get::<i64, _>("score") as f64);
+    json!({
+        "user_id": if anonymous { serde_json::Value::Null } else { json!(id) },
+        "name": if anonymous {
+            format!("Anonymous #{}", id % 10000)
+        } else {
+            row.get::<String, _>("display_name")
+        },
+        "score": score,
+    })
 }
 
 pub fn now_rfc3339() -> String {

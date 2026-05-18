@@ -44,6 +44,26 @@ pub struct EnabledRequest {
     pub enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TransferRequest {
+    pub to_user_id: i64,
+    pub points: f64,
+    pub memo: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RedPacketRequest {
+    pub phrase: String,
+    pub total_points: f64,
+    pub total_parts: i64,
+    pub mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClaimRedPacketRequest {
+    pub phrase: String,
+}
+
 pub async fn register(
     State(state): State<crate::app::AppState>,
     Json(request): Json<RegisterRequest>,
@@ -217,4 +237,84 @@ pub async fn update_settings(
     require_admin(&auth.user)?;
     state.db.upsert_settings(&request).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn set_anonymous_leaderboard(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Json(request): Json<EnabledRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let user = state
+        .db
+        .set_anonymous_leaderboard(auth.user.id, request.enabled)
+        .await?;
+    Ok(Json(json!(user)))
+}
+
+pub async fn transfer_points(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Json(request): Json<TransferRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    state
+        .db
+        .transfer_points(
+            auth.user.id,
+            request.to_user_id,
+            request.points,
+            request.memo.as_deref(),
+        )
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn list_transfers(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(json!(state.db.list_transfers(auth.user.id).await?)))
+}
+
+pub async fn create_red_packet(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Json(request): Json<RedPacketRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    state
+        .db
+        .create_red_packet(
+            auth.user.id,
+            &request.phrase,
+            request.total_points,
+            request.total_parts,
+            &request.mode,
+        )
+        .await?;
+    Ok(Json(json!({ "phrase": request.phrase })))
+}
+
+pub async fn claim_red_packet(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Json(request): Json<ClaimRedPacketRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let points = state
+        .db
+        .claim_red_packet(auth.user.id, &request.phrase)
+        .await?;
+    Ok(Json(json!({ "points": points })))
+}
+
+pub async fn list_red_packets(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(json!(state.db.list_red_packets(auth.user.id).await?)))
+}
+
+pub async fn leaderboards(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(_auth): ConsoleAuth,
+) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(state.db.leaderboards().await?))
 }

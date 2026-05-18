@@ -73,7 +73,12 @@ pub fn build_router(state: AppState, config: &Config) -> Router {
         .route("/affinity-rules", get(crate::admin::list_affinity_rules).post(crate::admin::create_affinity_rule))
         .route("/ledger", get(crate::admin::list_ledger))
         .route("/dashboard", get(crate::admin::dashboard))
-        .route("/settings", get(crate::admin::get_settings).post(crate::admin::update_settings));
+        .route("/settings", get(crate::admin::get_settings).post(crate::admin::update_settings))
+        .route("/profile/anonymous-leaderboard", post(crate::admin::set_anonymous_leaderboard))
+        .route("/transfers", get(crate::admin::list_transfers).post(crate::admin::transfer_points))
+        .route("/red-packets", get(crate::admin::list_red_packets).post(crate::admin::create_red_packet))
+        .route("/red-packets/claim", post(crate::admin::claim_red_packet))
+        .route("/leaderboards", get(crate::admin::leaderboards));
 
     let static_service = ServeDir::new(&config.frontend_dist)
         .not_found_service(ServeFile::new(config.frontend_dist.join("index.html")));
