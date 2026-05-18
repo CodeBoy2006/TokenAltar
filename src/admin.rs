@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -7,7 +9,7 @@ use serde_json::json;
 
 use crate::{
     auth::{ConsoleAuth, require_admin, verify_password},
-    db::{AffinityRuleInput, ChannelInput, SettingUpdate},
+    db::{AffinityRuleInput, ApiKeyUpdateInput, ChannelInput, ChannelUpdateInput, SettingUpdate},
     error::{AppError, AppResult},
     gateway::surge_multiplier,
     models::{ModelPrice, User},
@@ -37,11 +39,30 @@ pub struct AuthResponse {
 pub struct CreateApiKeyRequest {
     pub name: String,
     pub spend_limit_points: Option<f64>,
+    pub allowed_models: Option<Vec<String>>,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct EnabledRequest {
     pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchIdsRequest {
+    pub ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChannelBatchEnabledRequest {
+    pub ids: Vec<i64>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CopyChannelRequest {
+    pub suffix: Option<String>,
+    pub reset_usage: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +157,20 @@ pub async fn create_api_key(
         .db
         .create_api_key(auth.user.id, &request.name, request.spend_limit_points)
         .await?;
+    if request.allowed_models.is_some() || request.expires_at.is_some() {
+        let update = ApiKeyUpdateInput {
+            name: record.name.clone(),
+            enabled: record.enabled,
+            spend_limit_points: record.spend_limit_points,
+            expires_at: request.expires_at,
+            allowed_models: request.allowed_models.unwrap_or_default(),
+        };
+        let record = state
+            .db
+            .update_api_key(auth.user.id, record.id, update)
+            .await?;
+        return Ok(Json(json!({ "token": token, "record": record })));
+    }
     Ok(Json(json!({ "token": token, "record": record })))
 }
 
@@ -160,6 +195,46 @@ pub async fn set_api_key_enabled(
     Ok(Json(json!({ "ok": true })))
 }
 
+pub async fn update_api_key(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+    Json(request): Json<ApiKeyUpdateInput>,
+) -> AppResult<Json<serde_json::Value>> {
+    let record = state.db.update_api_key(auth.user.id, id, request).await?;
+    Ok(Json(json!(record)))
+}
+
+pub async fn rotate_api_key(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+) -> AppResult<Json<serde_json::Value>> {
+    let (token, record) = state.db.rotate_api_key(auth.user.id, id).await?;
+    Ok(Json(json!({ "token": token, "record": record })))
+}
+
+pub async fn delete_api_key(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+) -> AppResult<Json<serde_json::Value>> {
+    state.db.delete_api_key(auth.user.id, id).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn batch_delete_api_keys(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Json(request): Json<BatchIdsRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let count = state
+        .db
+        .batch_delete_api_keys(auth.user.id, &request.ids)
+        .await?;
+    Ok(Json(json!({ "deleted": count })))
+}
+
 pub async fn list_channels(
     State(state): State<crate::app::AppState>,
     ConsoleAuth(auth): ConsoleAuth,
@@ -177,6 +252,108 @@ pub async fn create_channel(
 ) -> AppResult<Json<serde_json::Value>> {
     let channel = state.db.upsert_channel(auth.user.id, request).await?;
     Ok(Json(json!(crate::models::PublicChannel::from(channel))))
+}
+
+pub async fn update_channel(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+    Json(request): Json<ChannelUpdateInput>,
+) -> AppResult<Json<serde_json::Value>> {
+    let channel = state.db.update_channel(&auth.user, id, request).await?;
+    Ok(Json(json!(channel)))
+}
+
+pub async fn set_channel_enabled(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+    Json(request): Json<EnabledRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let channel = state
+        .db
+        .set_channel_enabled(&auth.user, id, request.enabled)
+        .await?;
+    Ok(Json(json!(channel)))
+}
+
+pub async fn delete_channel(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+) -> AppResult<Json<serde_json::Value>> {
+    state.db.delete_channel(&auth.user, id).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn batch_set_channels_enabled(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Json(request): Json<ChannelBatchEnabledRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let count = state
+        .db
+        .batch_set_channels_enabled(&auth.user, &request.ids, request.enabled)
+        .await?;
+    Ok(Json(json!({ "updated": count })))
+}
+
+pub async fn copy_channel(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+    Json(request): Json<CopyChannelRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let suffix = request.suffix.as_deref().unwrap_or(" copy");
+    let channel = state
+        .db
+        .copy_channel(&auth.user, id, suffix, request.reset_usage.unwrap_or(true))
+        .await?;
+    Ok(Json(json!(channel)))
+}
+
+pub async fn test_channel(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+) -> AppResult<Json<serde_json::Value>> {
+    let channel = state.db.get_channel(id).await?;
+    if auth.user.role != "admin" && channel.owner_user_id != auth.user.id {
+        return Err(AppError::Forbidden);
+    }
+    let url = match channel.provider {
+        crate::models::ProviderKind::Gemini => {
+            format!("{}/v1beta/models", channel.base_url.trim_end_matches('/'))
+        }
+        _ => format!("{}/v1/models", channel.base_url.trim_end_matches('/')),
+    };
+    let started = Instant::now();
+    let result = state
+        .http
+        .get(url)
+        .headers(provider_test_headers(
+            &channel.provider,
+            &channel.api_key_secret,
+        ))
+        .send()
+        .await;
+    let latency_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let (ok, message) = match result {
+        Ok(response) if response.status().is_success() => {
+            (true, format!("HTTP {}", response.status()))
+        }
+        Ok(response) => (false, format!("HTTP {}", response.status())),
+        Err(err) => (false, err.to_string()),
+    };
+    state
+        .db
+        .record_channel_health(id, latency_ms, if ok { None } else { Some(&message) })
+        .await?;
+    Ok(Json(json!({
+        "ok": ok,
+        "latency_ms": latency_ms,
+        "message": message,
+    })))
 }
 
 pub async fn list_prices(
@@ -345,4 +522,33 @@ pub async fn leaderboards(
             .leaderboards(period, state.leaderboard_timezone.as_deref())
             .await?,
     ))
+}
+
+fn provider_test_headers(
+    provider: &crate::models::ProviderKind,
+    api_key: &str,
+) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    match provider {
+        crate::models::ProviderKind::OpenAi => {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&format!("Bearer {api_key}")) {
+                headers.insert(axum::http::header::AUTHORIZATION, value);
+            }
+        }
+        crate::models::ProviderKind::Anthropic => {
+            if let Ok(value) = axum::http::HeaderValue::from_str(api_key) {
+                headers.insert("x-api-key", value);
+            }
+            headers.insert(
+                "anthropic-version",
+                axum::http::HeaderValue::from_static("2023-06-01"),
+            );
+        }
+        crate::models::ProviderKind::Gemini => {
+            if let Ok(value) = axum::http::HeaderValue::from_str(api_key) {
+                headers.insert("x-goog-api-key", value);
+            }
+        }
+    }
+    headers
 }

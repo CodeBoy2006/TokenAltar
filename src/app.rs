@@ -73,13 +73,36 @@ pub fn build_router(state: AppState, config: &Config) -> Router {
             get(crate::admin::list_api_keys).post(crate::admin::create_api_key),
         )
         .route(
+            "/api-keys/batch-delete",
+            post(crate::admin::batch_delete_api_keys),
+        )
+        .route(
             "/api-keys/{id}/enabled",
             post(crate::admin::set_api_key_enabled),
         )
         .route(
+            "/api-keys/{id}",
+            axum::routing::patch(crate::admin::update_api_key).delete(crate::admin::delete_api_key),
+        )
+        .route("/api-keys/{id}/rotate", post(crate::admin::rotate_api_key))
+        .route(
             "/channels",
             get(crate::admin::list_channels).post(crate::admin::create_channel),
         )
+        .route(
+            "/channels/batch-enabled",
+            post(crate::admin::batch_set_channels_enabled),
+        )
+        .route(
+            "/channels/{id}",
+            axum::routing::patch(crate::admin::update_channel).delete(crate::admin::delete_channel),
+        )
+        .route(
+            "/channels/{id}/enabled",
+            post(crate::admin::set_channel_enabled),
+        )
+        .route("/channels/{id}/copy", post(crate::admin::copy_channel))
+        .route("/channels/{id}/test", post(crate::admin::test_channel))
         .route(
             "/prices",
             get(crate::admin::list_prices).post(crate::admin::upsert_price),

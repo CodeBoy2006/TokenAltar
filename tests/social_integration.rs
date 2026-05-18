@@ -241,6 +241,238 @@ async fn users_create_channels_and_list_only_their_masked_channels() {
     assert!(channels[0].get("api_key_secret").is_none());
 }
 
+#[tokio::test]
+async fn api_key_management_updates_rotates_and_soft_deletes_keys() {
+    let state = setup_state().await;
+    let alice = state
+        .db
+        .create_user("key-owner@example.com", "password123", "KeyOwner")
+        .await
+        .unwrap();
+    let alice_token = state.db.create_session(alice.id).await.unwrap();
+    let (gateway_key, record) = state
+        .db
+        .create_api_key(alice.id, "mutable", Some(100.0))
+        .await
+        .unwrap();
+    let app = build_router(state.clone(), &test_config("unused"));
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/api-keys/{}", record.id))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::from(
+                    json!({
+                        "name": "prod-agent",
+                        "enabled": true,
+                        "spend_limit_points": 42,
+                        "expires_at": null,
+                        "allowed_models": ["gpt-4o*", "claude-3*"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let updated: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated["name"], "prod-agent");
+    assert_eq!(updated["allowed_models"][0], "gpt-4o*");
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/api-keys/{}/rotate", record.id))
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let rotated: Value = serde_json::from_slice(&body).unwrap();
+    let rotated_key = rotated["token"].as_str().unwrap();
+    assert_ne!(rotated_key, gateway_key);
+    assert!(
+        state
+            .db
+            .find_api_key(&token_hash(&gateway_key))
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .db
+            .find_api_key(&token_hash(rotated_key))
+            .await
+            .is_ok()
+    );
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/api-keys/{}", record.id))
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        state
+            .db
+            .find_api_key(&token_hash(rotated_key))
+            .await
+            .is_err()
+    );
+    assert!(state.db.list_api_keys(alice.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn channel_management_updates_copies_batches_and_soft_deletes() {
+    let state = setup_state().await;
+    let alice = state
+        .db
+        .create_user("channel-owner@example.com", "password123", "ChannelOwner")
+        .await
+        .unwrap();
+    let alice_token = state.db.create_session(alice.id).await.unwrap();
+    let channel = state
+        .db
+        .upsert_channel(
+            alice.id,
+            ChannelInput {
+                name: "editable".to_string(),
+                provider: "openai".to_string(),
+                base_url: "http://127.0.0.1:9".to_string(),
+                api_key_secret: "old-secret".to_string(),
+                models: vec!["gpt-old".to_string()],
+                enabled: true,
+                cycle_limit_tokens: 1000,
+                cycle_reset_day: 1,
+                daily_limit_tokens: 500,
+                hourly_limit_tokens: 100,
+                fire_sale_days_before: 3,
+                fire_sale_remaining_pct: 0.25,
+                fire_sale_discount: 0.2,
+                provider_share: 0.7,
+            },
+        )
+        .await
+        .unwrap();
+    let app = build_router(state.clone(), &test_config("unused"));
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/channels/{}", channel.id))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::from(
+                    json!({
+                        "name": "editable-renamed",
+                        "provider": "anthropic",
+                        "base_url": "https://api.anthropic.com",
+                        "api_key_secret": "",
+                        "models": ["claude-3*"],
+                        "enabled": true,
+                        "cycle_limit_tokens": 2000,
+                        "cycle_reset_day": 2,
+                        "daily_limit_tokens": 1000,
+                        "hourly_limit_tokens": 100,
+                        "fire_sale_days_before": 4,
+                        "fire_sale_remaining_pct": 0.5,
+                        "fire_sale_discount": 0.3,
+                        "provider_share": 0.6
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated = state.db.get_channel(channel.id).await.unwrap();
+    assert_eq!(updated.name, "editable-renamed");
+    assert_eq!(updated.api_key_secret, "old-secret");
+    assert_eq!(updated.models, vec!["claude-3*"]);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/channels/{}/copy", channel.id))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::from(
+                    json!({"suffix": " clone", "reset_usage": true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let copied: Value = serde_json::from_slice(&body).unwrap();
+    let copied_id = copied["id"].as_i64().unwrap();
+    assert_ne!(copied_id, channel.id);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/channels/batch-enabled")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::from(
+                    json!({"ids": [channel.id, copied_id], "enabled": false}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!state.db.get_channel(channel.id).await.unwrap().enabled);
+    assert!(!state.db.get_channel(copied_id).await.unwrap().enabled);
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/channels/{copied_id}"))
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(state.db.get_channel(copied_id).await.is_err());
+    let visible = state.db.list_public_channels(&alice).await.unwrap();
+    assert!(visible.iter().all(|item| item.id != copied_id));
+}
+
 async fn setup_state() -> AppState {
     let config = Config {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -292,6 +524,10 @@ async fn setup_state() -> AppState {
         .await
         .unwrap();
     state
+}
+
+fn token_hash(token: &str) -> String {
+    tokenaltar::auth::hash_token(token)
 }
 
 fn test_config(database_url: &str) -> Config {

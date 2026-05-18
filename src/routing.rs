@@ -174,6 +174,9 @@ mod tests {
                 models: vec!["*".to_string()],
                 enabled: true,
                 status: "healthy".to_string(),
+                health_checked_at: None,
+                upstream_latency_ms: None,
+                last_error: None,
                 limits: limits(100),
             },
             Channel {
@@ -186,6 +189,9 @@ mod tests {
                 models: vec!["*".to_string()],
                 enabled: true,
                 status: "healthy".to_string(),
+                health_checked_at: None,
+                upstream_latency_ms: None,
+                last_error: None,
                 limits: limits(100),
             },
         ];

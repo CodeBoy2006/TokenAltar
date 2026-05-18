@@ -20,6 +20,9 @@ pub struct ApiKeyRecord {
     pub enabled: bool,
     pub spend_limit_points: Option<f64>,
     pub spent_points: f64,
+    pub expires_at: Option<String>,
+    pub allowed_models: Vec<String>,
+    pub last_used_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,6 +67,9 @@ pub struct Channel {
     pub models: Vec<String>,
     pub enabled: bool,
     pub status: String,
+    pub health_checked_at: Option<String>,
+    pub upstream_latency_ms: Option<i64>,
+    pub last_error: Option<String>,
     pub limits: ChannelLimits,
 }
 
@@ -77,6 +83,9 @@ pub struct PublicChannel {
     pub models: Vec<String>,
     pub enabled: bool,
     pub status: String,
+    pub health_checked_at: Option<String>,
+    pub upstream_latency_ms: Option<i64>,
+    pub last_error: Option<String>,
     pub limits: ChannelLimits,
 }
 
@@ -91,6 +100,9 @@ impl From<Channel> for PublicChannel {
             models: channel.models,
             enabled: channel.enabled,
             status: channel.status,
+            health_checked_at: channel.health_checked_at,
+            upstream_latency_ms: channel.upstream_latency_ms,
+            last_error: channel.last_error,
             limits: channel.limits,
         }
     }

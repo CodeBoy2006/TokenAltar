@@ -169,6 +169,7 @@ async fn handle_gateway(
     }
     let request = parse_client_request(endpoint.client_protocol, &parse_body)?;
     let api_key = auth.api_key.clone().ok_or(AppError::Unauthorized)?;
+    ensure_api_key_model_allowed(&api_key, &request.model)?;
     state.db.refresh_channel_windows().await?;
     let global_prices = state.db.global_price_book().await?;
     let reserve_price = select_price(&request.model, &global_prices);
@@ -261,6 +262,23 @@ async fn handle_gateway(
         upstream,
     )
     .await
+}
+
+fn ensure_api_key_model_allowed(
+    api_key: &crate::models::ApiKeyRecord,
+    model: &str,
+) -> AppResult<()> {
+    if api_key.allowed_models.is_empty() {
+        return Ok(());
+    }
+    let allowed = api_key.allowed_models.iter().any(|pattern| {
+        pattern == "*" || pattern == model || model.starts_with(pattern.trim_end_matches('*'))
+    });
+    if allowed {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
 }
 
 fn ensure_affordable(

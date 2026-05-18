@@ -222,7 +222,7 @@ impl Database {
         let token = generate_token("sk");
         let key_prefix = token.chars().take(12).collect::<String>();
         let result = sqlx::query(
-            "INSERT INTO api_keys(user_id, name, key_prefix, key_hash, spend_limit_points) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO api_keys(user_id, name, key_prefix, key_hash, spend_limit_points, allowed_models_json, updated_at) VALUES (?, ?, ?, ?, ?, '[]', datetime('now'))",
         )
         .bind(user_id)
         .bind(name)
@@ -237,7 +237,7 @@ impl Database {
 
     pub async fn get_api_key(&self, id: i64) -> AppResult<ApiKeyRecord> {
         let row = sqlx::query(
-            "SELECT id, user_id, name, key_prefix, enabled, spend_limit_points, spent_points FROM api_keys WHERE id = ?",
+            "SELECT id, user_id, name, key_prefix, enabled, spend_limit_points, spent_points, expires_at, allowed_models_json, last_used_at FROM api_keys WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -248,7 +248,7 @@ impl Database {
 
     pub async fn list_api_keys(&self, user_id: i64) -> AppResult<Vec<ApiKeyRecord>> {
         let rows = sqlx::query(
-            "SELECT id, user_id, name, key_prefix, enabled, spend_limit_points, spent_points FROM api_keys WHERE user_id = ? ORDER BY id DESC",
+            "SELECT id, user_id, name, key_prefix, enabled, spend_limit_points, spent_points, expires_at, allowed_models_json, last_used_at FROM api_keys WHERE user_id = ? AND deleted_at IS NULL ORDER BY id DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -257,7 +257,9 @@ impl Database {
     }
 
     pub async fn set_api_key_enabled(&self, user_id: i64, id: i64, enabled: bool) -> AppResult<()> {
-        let result = sqlx::query("UPDATE api_keys SET enabled = ? WHERE id = ? AND user_id = ?")
+        let result = sqlx::query(
+            "UPDATE api_keys SET enabled = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        )
             .bind(if enabled { 1 } else { 0 })
             .bind(id)
             .bind(user_id)
@@ -270,9 +272,102 @@ impl Database {
         }
     }
 
+    pub async fn update_api_key(
+        &self,
+        user_id: i64,
+        id: i64,
+        input: ApiKeyUpdateInput,
+    ) -> AppResult<ApiKeyRecord> {
+        validate_api_key_name(&input.name)?;
+        validate_spend_limit(input.spend_limit_points)?;
+        let allowed_models_json = normalize_models_json(&input.allowed_models)?;
+        let result = sqlx::query(
+            r#"
+            UPDATE api_keys
+            SET name = ?, enabled = ?, spend_limit_points = ?, expires_at = ?,
+                allowed_models_json = ?, updated_at = datetime('now')
+            WHERE id = ? AND user_id = ? AND deleted_at IS NULL
+            "#,
+        )
+        .bind(input.name.trim())
+        .bind(if input.enabled { 1 } else { 0 })
+        .bind(input.spend_limit_points)
+        .bind(normalize_optional_text(input.expires_at.as_deref()))
+        .bind(allowed_models_json)
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
+        self.get_api_key(id).await
+    }
+
+    pub async fn rotate_api_key(&self, user_id: i64, id: i64) -> AppResult<(String, ApiKeyRecord)> {
+        let token = generate_token("sk");
+        let key_prefix = token.chars().take(12).collect::<String>();
+        let result = sqlx::query(
+            r#"
+            UPDATE api_keys
+            SET key_prefix = ?, key_hash = ?, enabled = 1, updated_at = datetime('now')
+            WHERE id = ? AND user_id = ? AND deleted_at IS NULL
+            "#,
+        )
+        .bind(&key_prefix)
+        .bind(hash_token(&token))
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
+        Ok((token, self.get_api_key(id).await?))
+    }
+
+    pub async fn delete_api_key(&self, user_id: i64, id: i64) -> AppResult<()> {
+        let result = sqlx::query(
+            "UPDATE api_keys SET enabled = 0, deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            Err(AppError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub async fn batch_delete_api_keys(&self, user_id: i64, ids: &[i64]) -> AppResult<u64> {
+        validate_batch_ids(ids)?;
+        let mut tx = self.pool.begin().await?;
+        let mut count = 0;
+        for id in ids {
+            let result = sqlx::query(
+                "UPDATE api_keys SET enabled = 0, deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            )
+            .bind(id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+            count += result.rows_affected();
+        }
+        tx.commit().await?;
+        Ok(count)
+    }
+
     pub async fn find_api_key(&self, key_hash: &str) -> AppResult<ApiKeyRecord> {
         let row = sqlx::query(
-            "SELECT id, user_id, name, key_prefix, enabled, spend_limit_points, spent_points FROM api_keys WHERE key_hash = ?",
+            r#"
+            SELECT id, user_id, name, key_prefix, enabled, spend_limit_points, spent_points,
+                   expires_at, allowed_models_json, last_used_at
+            FROM api_keys
+            WHERE key_hash = ? AND deleted_at IS NULL
+              AND (expires_at IS NULL OR expires_at > datetime('now'))
+            "#,
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)
@@ -281,15 +376,24 @@ impl Database {
         Ok(api_key_from_row(&row))
     }
 
+    pub async fn mark_api_key_used(&self, id: i64) -> AppResult<()> {
+        sqlx::query("UPDATE api_keys SET last_used_at = datetime('now') WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_route_channels(&self) -> AppResult<Vec<Channel>> {
         let rows = sqlx::query(
             r#"
             SELECT c.id, c.owner_user_id, c.name, c.provider, c.base_url, c.api_key_secret, c.models_json,
-                   c.enabled, c.status,
+                   c.enabled, c.status, c.health_checked_at, c.upstream_latency_ms, c.last_error,
                    l.cycle_limit_tokens, l.cycle_reset_day, l.daily_limit_tokens, l.hourly_limit_tokens,
                    l.used_cycle_tokens, l.used_day_tokens, l.used_hour_tokens,
                    l.fire_sale_days_before, l.fire_sale_remaining_pct, l.fire_sale_discount, l.provider_share
             FROM channels c JOIN channel_limits l ON c.id = l.channel_id
+            WHERE c.deleted_at IS NULL
             ORDER BY c.id DESC
             "#,
         )
@@ -303,11 +407,12 @@ impl Database {
             sqlx::query(
                 r#"
                 SELECT c.id, c.owner_user_id, c.name, c.provider, c.base_url, c.api_key_secret, c.models_json,
-                       c.enabled, c.status,
+                       c.enabled, c.status, c.health_checked_at, c.upstream_latency_ms, c.last_error,
                        l.cycle_limit_tokens, l.cycle_reset_day, l.daily_limit_tokens, l.hourly_limit_tokens,
                        l.used_cycle_tokens, l.used_day_tokens, l.used_hour_tokens,
                        l.fire_sale_days_before, l.fire_sale_remaining_pct, l.fire_sale_discount, l.provider_share
                 FROM channels c JOIN channel_limits l ON c.id = l.channel_id
+                WHERE c.deleted_at IS NULL
                 ORDER BY c.id DESC
                 "#,
             )
@@ -317,12 +422,12 @@ impl Database {
             sqlx::query(
                 r#"
                 SELECT c.id, c.owner_user_id, c.name, c.provider, c.base_url, c.api_key_secret, c.models_json,
-                       c.enabled, c.status,
+                       c.enabled, c.status, c.health_checked_at, c.upstream_latency_ms, c.last_error,
                        l.cycle_limit_tokens, l.cycle_reset_day, l.daily_limit_tokens, l.hourly_limit_tokens,
                        l.used_cycle_tokens, l.used_day_tokens, l.used_hour_tokens,
                        l.fire_sale_days_before, l.fire_sale_remaining_pct, l.fire_sale_discount, l.provider_share
                 FROM channels c JOIN channel_limits l ON c.id = l.channel_id
-                WHERE c.owner_user_id = ?
+                WHERE c.owner_user_id = ? AND c.deleted_at IS NULL
                 ORDER BY c.id DESC
                 "#,
             )
@@ -341,6 +446,7 @@ impl Database {
         owner_user_id: i64,
         input: ChannelInput,
     ) -> AppResult<Channel> {
+        validate_channel_input(&input, true)?;
         let mut tx = self.pool.begin().await?;
         let models_json = serde_json::to_string(&input.models)
             .map_err(|err| AppError::Anyhow(anyhow::anyhow!(err)))?;
@@ -384,12 +490,12 @@ impl Database {
         let row = sqlx::query(
             r#"
             SELECT c.id, c.owner_user_id, c.name, c.provider, c.base_url, c.api_key_secret, c.models_json,
-                   c.enabled, c.status,
+                   c.enabled, c.status, c.health_checked_at, c.upstream_latency_ms, c.last_error,
                    l.cycle_limit_tokens, l.cycle_reset_day, l.daily_limit_tokens, l.hourly_limit_tokens,
                    l.used_cycle_tokens, l.used_day_tokens, l.used_hour_tokens,
                    l.fire_sale_days_before, l.fire_sale_remaining_pct, l.fire_sale_discount, l.provider_share
             FROM channels c JOIN channel_limits l ON c.id = l.channel_id
-            WHERE c.id = ?
+            WHERE c.id = ? AND c.deleted_at IS NULL
             "#,
         )
         .bind(id)
@@ -397,6 +503,221 @@ impl Database {
         .await?
         .ok_or(AppError::NotFound)?;
         channel_from_row(&row)
+    }
+
+    pub async fn update_channel(
+        &self,
+        user: &User,
+        id: i64,
+        input: ChannelUpdateInput,
+    ) -> AppResult<PublicChannel> {
+        validate_channel_update(&input)?;
+        let existing = self.get_channel(id).await?;
+        if user.role != "admin" && existing.owner_user_id != user.id {
+            return Err(AppError::Forbidden);
+        }
+        let models_json = normalize_models_json(&input.models)?;
+        let api_key = normalize_optional_text(input.api_key_secret.as_deref())
+            .unwrap_or(existing.api_key_secret);
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            r#"
+            UPDATE channels
+            SET name = ?, provider = ?, base_url = ?, api_key_secret = ?, models_json = ?,
+                enabled = ?, status = CASE WHEN ? = 1 THEN 'healthy' ELSE status END,
+                updated_at = datetime('now')
+            WHERE id = ? AND deleted_at IS NULL
+            "#,
+        )
+        .bind(input.name.trim())
+        .bind(&input.provider)
+        .bind(input.base_url.trim())
+        .bind(api_key)
+        .bind(models_json)
+        .bind(if input.enabled { 1 } else { 0 })
+        .bind(if input.enabled { 1 } else { 0 })
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
+        sqlx::query(
+            r#"
+            UPDATE channel_limits
+            SET cycle_limit_tokens = ?, cycle_reset_day = ?, daily_limit_tokens = ?, hourly_limit_tokens = ?,
+                fire_sale_days_before = ?, fire_sale_remaining_pct = ?, fire_sale_discount = ?,
+                provider_share = ?, updated_at = datetime('now')
+            WHERE channel_id = ?
+            "#,
+        )
+        .bind(input.cycle_limit_tokens)
+        .bind(input.cycle_reset_day)
+        .bind(input.daily_limit_tokens)
+        .bind(input.hourly_limit_tokens)
+        .bind(input.fire_sale_days_before)
+        .bind(input.fire_sale_remaining_pct)
+        .bind(input.fire_sale_discount)
+        .bind(input.provider_share)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.get_channel(id).await.map(PublicChannel::from)
+    }
+
+    pub async fn set_channel_enabled(
+        &self,
+        user: &User,
+        id: i64,
+        enabled: bool,
+    ) -> AppResult<PublicChannel> {
+        let existing = self.get_channel(id).await?;
+        if user.role != "admin" && existing.owner_user_id != user.id {
+            return Err(AppError::Forbidden);
+        }
+        let status = if enabled {
+            "healthy"
+        } else {
+            "manual_disabled"
+        };
+        let result = sqlx::query(
+            "UPDATE channels SET enabled = ?, status = ?, updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(if enabled { 1 } else { 0 })
+        .bind(status)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
+        self.get_channel(id).await.map(PublicChannel::from)
+    }
+
+    pub async fn delete_channel(&self, user: &User, id: i64) -> AppResult<()> {
+        let existing = self.get_channel(id).await?;
+        if user.role != "admin" && existing.owner_user_id != user.id {
+            return Err(AppError::Forbidden);
+        }
+        let result = sqlx::query(
+            "UPDATE channels SET enabled = 0, status = 'deleted', deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            Err(AppError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub async fn batch_set_channels_enabled(
+        &self,
+        user: &User,
+        ids: &[i64],
+        enabled: bool,
+    ) -> AppResult<u64> {
+        validate_batch_ids(ids)?;
+        for id in ids {
+            let existing = self.get_channel(*id).await?;
+            if user.role != "admin" && existing.owner_user_id != user.id {
+                return Err(AppError::Forbidden);
+            }
+        }
+        let mut tx = self.pool.begin().await?;
+        let mut count = 0;
+        let status = if enabled {
+            "healthy"
+        } else {
+            "manual_disabled"
+        };
+        for id in ids {
+            let result = sqlx::query(
+                "UPDATE channels SET enabled = ?, status = ?, updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL",
+            )
+            .bind(if enabled { 1 } else { 0 })
+            .bind(status)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            count += result.rows_affected();
+        }
+        tx.commit().await?;
+        Ok(count)
+    }
+
+    pub async fn copy_channel(
+        &self,
+        user: &User,
+        id: i64,
+        suffix: &str,
+        reset_usage: bool,
+    ) -> AppResult<PublicChannel> {
+        let existing = self.get_channel(id).await?;
+        if user.role != "admin" && existing.owner_user_id != user.id {
+            return Err(AppError::Forbidden);
+        }
+        let input = ChannelInput {
+            name: format!("{}{}", existing.name, suffix),
+            provider: existing.provider.as_db().to_string(),
+            base_url: existing.base_url,
+            api_key_secret: existing.api_key_secret,
+            models: existing.models,
+            enabled: existing.enabled,
+            cycle_limit_tokens: existing.limits.cycle_limit_tokens,
+            cycle_reset_day: existing.limits.cycle_reset_day,
+            daily_limit_tokens: existing.limits.daily_limit_tokens,
+            hourly_limit_tokens: existing.limits.hourly_limit_tokens,
+            fire_sale_days_before: existing.limits.fire_sale_days_before,
+            fire_sale_remaining_pct: existing.limits.fire_sale_remaining_pct,
+            fire_sale_discount: existing.limits.fire_sale_discount,
+            provider_share: existing.limits.provider_share,
+        };
+        let clone = self.upsert_channel(existing.owner_user_id, input).await?;
+        if !reset_usage {
+            sqlx::query(
+                r#"
+                UPDATE channel_limits
+                SET used_cycle_tokens = ?, used_day_tokens = ?, used_hour_tokens = ?
+                WHERE channel_id = ?
+                "#,
+            )
+            .bind(existing.limits.used_cycle_tokens)
+            .bind(existing.limits.used_day_tokens)
+            .bind(existing.limits.used_hour_tokens)
+            .bind(clone.id)
+            .execute(&self.pool)
+            .await?;
+        }
+        self.get_channel(clone.id).await.map(PublicChannel::from)
+    }
+
+    pub async fn record_channel_health(
+        &self,
+        channel_id: i64,
+        latency_ms: i64,
+        last_error: Option<&str>,
+    ) -> AppResult<()> {
+        let result = sqlx::query(
+            r#"
+            UPDATE channels
+            SET health_checked_at = datetime('now'), upstream_latency_ms = ?, last_error = ?,
+                updated_at = datetime('now')
+            WHERE id = ? AND deleted_at IS NULL
+            "#,
+        )
+        .bind(latency_ms)
+        .bind(last_error)
+        .bind(channel_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            Err(AppError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn list_prices(&self, user: &User) -> AppResult<Vec<ModelPrice>> {
@@ -527,6 +848,7 @@ impl Database {
             r#"
             UPDATE channels
             SET status = CASE
+                WHEN deleted_at IS NOT NULL THEN status
                 WHEN enabled = 0 THEN status
                 WHEN (SELECT used_cycle_tokens >= cycle_limit_tokens FROM channel_limits WHERE channel_id = channels.id) THEN 'monthly_exhausted'
                 WHEN (SELECT used_day_tokens >= daily_limit_tokens OR used_hour_tokens >= hourly_limit_tokens FROM channel_limits WHERE channel_id = channels.id) THEN 'cooling'
@@ -542,6 +864,7 @@ impl Database {
 
     pub async fn upsert_price(&self, price: &ModelPrice) -> AppResult<()> {
         if let Some(channel_id) = price.channel_id {
+            let _ = self.get_channel(channel_id).await?;
             sqlx::query(
                 r#"
                 INSERT INTO model_prices(channel_id, model_pattern, input_price_per_1k, output_price_per_1k, cache_price_per_1k)
@@ -764,15 +1087,21 @@ impl Database {
         let users: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
             .fetch_one(&self.pool)
             .await?;
-        let channels: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM channels")
-            .fetch_one(&self.pool)
-            .await?;
-        let enabled_channels: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM channels WHERE enabled = 1")
+        let channels: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM channels WHERE deleted_at IS NULL")
                 .fetch_one(&self.pool)
                 .await?;
+        let enabled_channels: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM channels WHERE enabled = 1 AND deleted_at IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
         let available_tokens: (i64,) = sqlx::query_as(
-            "SELECT COALESCE(SUM(cycle_limit_tokens - used_cycle_tokens), 0) FROM channel_limits",
+            r#"
+            SELECT COALESCE(SUM(l.cycle_limit_tokens - l.used_cycle_tokens), 0)
+            FROM channel_limits l JOIN channels c ON c.id = l.channel_id
+            WHERE c.deleted_at IS NULL
+            "#,
         )
         .fetch_one(&self.pool)
         .await?;
@@ -1127,6 +1456,33 @@ pub struct ChannelInput {
     pub provider_share: f64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelUpdateInput {
+    pub name: String,
+    pub provider: String,
+    pub base_url: String,
+    pub api_key_secret: Option<String>,
+    pub models: Vec<String>,
+    pub enabled: bool,
+    pub cycle_limit_tokens: i64,
+    pub cycle_reset_day: i64,
+    pub daily_limit_tokens: i64,
+    pub hourly_limit_tokens: i64,
+    pub fire_sale_days_before: i64,
+    pub fire_sale_remaining_pct: f64,
+    pub fire_sale_discount: f64,
+    pub provider_share: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiKeyUpdateInput {
+    pub name: String,
+    pub enabled: bool,
+    pub spend_limit_points: Option<f64>,
+    pub expires_at: Option<String>,
+    pub allowed_models: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AffinityRuleInput {
     pub name: String,
@@ -1164,6 +1520,13 @@ fn api_key_from_row(row: &sqlx::sqlite::SqliteRow) -> ApiKeyRecord {
         enabled: row.get::<i64, _>("enabled") != 0,
         spend_limit_points: row.get("spend_limit_points"),
         spent_points: row.get("spent_points"),
+        expires_at: row.get("expires_at"),
+        allowed_models: row
+            .get::<Option<String>, _>("allowed_models_json")
+            .as_deref()
+            .map(json_array_to_strings)
+            .unwrap_or_default(),
+        last_used_at: row.get("last_used_at"),
     }
 }
 
@@ -1178,6 +1541,9 @@ fn channel_from_row(row: &sqlx::sqlite::SqliteRow) -> AppResult<Channel> {
         models: json_array_to_strings(&row.get::<String, _>("models_json")),
         enabled: row.get::<i64, _>("enabled") != 0,
         status: row.get("status"),
+        health_checked_at: row.get("health_checked_at"),
+        upstream_latency_ms: row.get("upstream_latency_ms"),
+        last_error: row.get("last_error"),
         limits: ChannelLimits {
             cycle_limit_tokens: row.get("cycle_limit_tokens"),
             cycle_reset_day: row.get("cycle_reset_day"),
@@ -1230,6 +1596,185 @@ fn leaderboard_row(row: &sqlx::sqlite::SqliteRow) -> serde_json::Value {
 
 pub fn now_rfc3339() -> String {
     DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339()
+}
+
+fn validate_api_key_name(name: &str) -> AppResult<()> {
+    if name.trim().is_empty() || name.chars().count() > 80 {
+        return Err(AppError::BadRequest(
+            "api key name must be 1-80 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_spend_limit(spend_limit_points: Option<f64>) -> AppResult<()> {
+    if let Some(limit) = spend_limit_points
+        && (!limit.is_finite() || limit < 0.0)
+    {
+        return Err(AppError::BadRequest(
+            "api key spend limit must be non-negative".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_batch_ids(ids: &[i64]) -> AppResult<()> {
+    if ids.is_empty() {
+        return Err(AppError::BadRequest("ids cannot be empty".to_string()));
+    }
+    if ids.len() > 100 {
+        return Err(AppError::BadRequest(
+            "batch operation accepts at most 100 ids".to_string(),
+        ));
+    }
+    if ids.iter().any(|id| *id <= 0) {
+        return Err(AppError::BadRequest(
+            "ids must be positive integers".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn normalize_models_json(models: &[String]) -> AppResult<String> {
+    let mut normalized = Vec::new();
+    for model in models {
+        let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        if model.len() > 255 {
+            return Err(AppError::BadRequest(format!(
+                "model pattern too long: {model}"
+            )));
+        }
+        if !normalized.iter().any(|existing: &String| existing == model) {
+            normalized.push(model.to_string());
+        }
+    }
+    serde_json::to_string(&normalized).map_err(|err| AppError::Anyhow(anyhow::anyhow!(err)))
+}
+
+fn validate_channel_input(input: &ChannelInput, require_key: bool) -> AppResult<()> {
+    validate_channel_fields(
+        &input.name,
+        &input.provider,
+        &input.base_url,
+        if require_key {
+            Some(input.api_key_secret.as_str())
+        } else {
+            None
+        },
+        &input.models,
+        input.cycle_limit_tokens,
+        input.cycle_reset_day,
+        input.daily_limit_tokens,
+        input.hourly_limit_tokens,
+        input.fire_sale_days_before,
+        input.fire_sale_remaining_pct,
+        input.fire_sale_discount,
+        input.provider_share,
+    )
+}
+
+fn validate_channel_update(input: &ChannelUpdateInput) -> AppResult<()> {
+    let api_key_secret = input.api_key_secret.as_deref().and_then(|value| {
+        if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    });
+    validate_channel_fields(
+        &input.name,
+        &input.provider,
+        &input.base_url,
+        api_key_secret,
+        &input.models,
+        input.cycle_limit_tokens,
+        input.cycle_reset_day,
+        input.daily_limit_tokens,
+        input.hourly_limit_tokens,
+        input.fire_sale_days_before,
+        input.fire_sale_remaining_pct,
+        input.fire_sale_discount,
+        input.provider_share,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_channel_fields(
+    name: &str,
+    provider: &str,
+    base_url: &str,
+    api_key_secret: Option<&str>,
+    models: &[String],
+    cycle_limit_tokens: i64,
+    cycle_reset_day: i64,
+    daily_limit_tokens: i64,
+    hourly_limit_tokens: i64,
+    fire_sale_days_before: i64,
+    fire_sale_remaining_pct: f64,
+    fire_sale_discount: f64,
+    provider_share: f64,
+) -> AppResult<()> {
+    if name.trim().is_empty() || name.chars().count() > 120 {
+        return Err(AppError::BadRequest(
+            "channel name must be 1-120 characters".to_string(),
+        ));
+    }
+    crate::models::ProviderKind::try_from(provider)
+        .map_err(|err| AppError::BadRequest(err.to_string()))?;
+    let parsed_url = reqwest::Url::parse(base_url.trim()).map_err(|_| {
+        AppError::BadRequest("channel base_url must be an absolute URL".to_string())
+    })?;
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        return Err(AppError::BadRequest(
+            "channel base_url must use http or https".to_string(),
+        ));
+    }
+    if let Some(secret) = api_key_secret
+        && secret.trim().is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "channel api key cannot be empty".to_string(),
+        ));
+    }
+    let _ = normalize_models_json(models)?;
+    if cycle_limit_tokens <= 0 || daily_limit_tokens <= 0 || hourly_limit_tokens <= 0 {
+        return Err(AppError::BadRequest(
+            "channel token limits must be positive".to_string(),
+        ));
+    }
+    if !(1..=28).contains(&cycle_reset_day) {
+        return Err(AppError::BadRequest(
+            "cycle reset day must be between 1 and 28".to_string(),
+        ));
+    }
+    if daily_limit_tokens > cycle_limit_tokens || hourly_limit_tokens > daily_limit_tokens {
+        return Err(AppError::BadRequest(
+            "hourly <= daily <= cycle limits must hold".to_string(),
+        ));
+    }
+    if fire_sale_days_before < 0
+        || !fire_sale_remaining_pct.is_finite()
+        || !(0.0..=1.0).contains(&fire_sale_remaining_pct)
+        || !fire_sale_discount.is_finite()
+        || !(0.0..=1.0).contains(&fire_sale_discount)
+        || !provider_share.is_finite()
+        || !(0.0..=1.0).contains(&provider_share)
+    {
+        return Err(AppError::BadRequest(
+            "channel economy knobs must be finite ratios in range".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn leaderboard_window_start(
