@@ -54,7 +54,9 @@ pub async fn choose_channel(
 ) -> AppResult<RouteDecision> {
     let healthy = filter_healthy(channels, model, runtime).await;
     if healthy.is_empty() {
-        return Err(AppError::BadRequest("no healthy channel for requested model".to_string()));
+        return Err(AppError::BadRequest(
+            "no healthy channel for requested model".to_string(),
+        ));
     }
 
     if let Some(hit) = affinity_hit.clone()
@@ -100,7 +102,9 @@ async fn filter_healthy<'a>(
         if !channel.enabled || channel.status != "healthy" || runtime.is_cooling(channel.id).await {
             continue;
         }
-        if !channel.models.is_empty() && !channel.models.iter().any(|item| model_matches(item, model)) {
+        if !channel.models.is_empty()
+            && !channel.models.iter().any(|item| model_matches(item, model))
+        {
             continue;
         }
         let remaining_cycle = channel.limits.cycle_limit_tokens - channel.limits.used_cycle_tokens;
@@ -185,7 +189,9 @@ mod tests {
                 limits: limits(100),
             },
         ];
-        let decision = choose_channel(&channels, "gpt-test", None, &runtime).await.unwrap();
+        let decision = choose_channel(&channels, "gpt-test", None, &runtime)
+            .await
+            .unwrap();
         assert_eq!(decision.channel.id, 2);
     }
 

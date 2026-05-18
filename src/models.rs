@@ -27,6 +27,7 @@ pub struct ApiKeyRecord {
 pub enum ProviderKind {
     OpenAi,
     Anthropic,
+    Gemini,
 }
 
 impl ProviderKind {
@@ -34,6 +35,7 @@ impl ProviderKind {
         match self {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
         }
     }
 }
@@ -45,6 +47,7 @@ impl TryFrom<&str> for ProviderKind {
         match value {
             "openai" => Ok(Self::OpenAi),
             "anthropic" => Ok(Self::Anthropic),
+            "gemini" => Ok(Self::Gemini),
             _ => anyhow::bail!("unsupported provider: {value}"),
         }
     }

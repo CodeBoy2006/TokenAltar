@@ -53,7 +53,11 @@ async fn red_packet_claim_is_single_use_per_user() {
         .create_red_packet(creator.id, "RustIsBest", 30.0, 3, "even")
         .await
         .unwrap();
-    let points = state.db.claim_red_packet(claimer.id, "RustIsBest").await.unwrap();
+    let points = state
+        .db
+        .claim_red_packet(claimer.id, "RustIsBest")
+        .await
+        .unwrap();
     assert_eq!(points, 10.0);
     let duplicate = state.db.claim_red_packet(claimer.id, "RustIsBest").await;
     assert!(duplicate.is_err());
@@ -67,7 +71,11 @@ async fn anonymous_leaderboard_masks_user_identity() {
         .create_user("anon@example.com", "password123", "Secret Name")
         .await
         .unwrap();
-    state.db.set_anonymous_leaderboard(user.id, true).await.unwrap();
+    state
+        .db
+        .set_anonymous_leaderboard(user.id, true)
+        .await
+        .unwrap();
     sqlx::query(
         r#"
         INSERT INTO ledger_entries(
@@ -85,10 +93,12 @@ async fn anonymous_leaderboard_masks_user_identity() {
     .unwrap();
 
     let leaderboards = state.db.leaderboards().await.unwrap();
-    assert!(leaderboards["providers"][0]["name"]
-        .as_str()
-        .unwrap()
-        .starts_with("Anonymous #"));
+    assert!(
+        leaderboards["providers"][0]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("Anonymous #")
+    );
     assert!(leaderboards["providers"][0]["user_id"].is_null());
 }
 
@@ -105,11 +115,7 @@ async fn users_create_channels_and_list_only_their_masked_channels() {
         .create_user("bob-channel@example.com", "password123", "Bob")
         .await
         .unwrap();
-    state
-        .db
-        .create_session(bob.id)
-        .await
-        .unwrap();
+    state.db.create_session(bob.id).await.unwrap();
     let alice_token = state.db.create_session(alice.id).await.unwrap();
     let bob_channel = state
         .db
@@ -213,7 +219,11 @@ async fn setup_state() -> AppState {
         .unwrap()
         .unwrap()
         .0;
-    state.db.create_api_key(admin.id, "test", None).await.unwrap();
+    state
+        .db
+        .create_api_key(admin.id, "test", None)
+        .await
+        .unwrap();
     state
         .db
         .upsert_channel(

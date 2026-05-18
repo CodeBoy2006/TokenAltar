@@ -10,7 +10,8 @@ pub struct MetricsState {
 
 impl MetricsState {
     pub fn add_tokens(&self, tokens: i64) {
-        self.rolling_hour_tokens.fetch_add(tokens, Ordering::Relaxed);
+        self.rolling_hour_tokens
+            .fetch_add(tokens, Ordering::Relaxed);
     }
 
     pub fn tokens_last_hour(&self) -> i64 {

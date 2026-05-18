@@ -29,3 +29,15 @@
 - **Status:** Completed
 - **Next Steps:** Run a production smoke test with one regular-user channel and one admin global default price.
 - **Context:** Gateway routing still uses full internal channel records, while console APIs return masked channel DTOs; channel prices override global model patterns only for the selected upstream channel.
+
+## [2026-05-18 15:21] Text Protocol Compatibility Pass
+- **Changes:** Reworked the gateway protocol layer into a text-only client/provider protocol matrix, added same-protocol passthrough for OpenAI Responses, Anthropic Messages, and Gemini Generate Content, added cross-protocol text conversion paths, introduced Gemini upstream channels and routes, and updated README/frontend provider selection.
+- **Status:** Completed
+- **Next Steps:** Add provider-specific golden fixtures as real upstream incompatibilities are found.
+- **Context:** new-api was cloned to `/tmp/tokenaltar-new-api-reference` for architecture reference only; no third-party source was copied into this repository.
+
+## [2026-05-18 15:31] Text Protocol Boundary Tightening
+- **Changes:** Narrowed Gemini path handling so the route action only influences temporary parse state, kept affinity/body inspection on the original request payload, and added a regression test to verify Gemini same-protocol passthrough does not leak internal fields.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** Text-only protocol support remains limited to chat/responses/messages/gemini generate content; embeddings, rerank, images, and realtime are still out of scope.

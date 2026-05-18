@@ -1,7 +1,4 @@
-use argon2::{
-    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
-    password_hash::SaltString,
-};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     extract::{FromRef, FromRequestParts},
     http::{StatusCode, request::Parts},
@@ -10,7 +7,11 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use crate::{app::AppState, error::{AppError, AppResult}, models::{AuthContext, User}};
+use crate::{
+    app::AppState,
+    error::{AppError, AppResult},
+    models::{AuthContext, User},
+};
 
 pub fn hash_password(password: &str) -> AppResult<String> {
     let salt = SaltString::encode_b64(&rand::random::<[u8; 16]>())

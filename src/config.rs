@@ -14,8 +14,8 @@ impl Config {
         let bind = env::var("TOKENALTAR_BIND")
             .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
             .parse()?;
-        let database_url =
-            env::var("TOKENALTAR_DATABASE_URL").unwrap_or_else(|_| "sqlite://tokenaltar.sqlite3".to_string());
+        let database_url = env::var("TOKENALTAR_DATABASE_URL")
+            .unwrap_or_else(|_| "sqlite://tokenaltar.sqlite3".to_string());
         let frontend_dist = env::var("TOKENALTAR_FRONTEND_DIST")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("frontend/dist"));

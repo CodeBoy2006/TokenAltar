@@ -11,7 +11,7 @@ use crate::{
     db::Database,
     error::AppResult,
     models::{AffinityRule, GatewayContext, value_to_key_fragment},
-    protocol::GeneralOpenAIRequest,
+    protocol::TextRequest,
 };
 
 #[derive(Clone)]
@@ -50,7 +50,7 @@ pub async fn lookup_affinity(
     request_path: &str,
     headers: &HeaderMap,
     body: &Value,
-    request: &GeneralOpenAIRequest,
+    request: &TextRequest,
     context: &GatewayContext,
 ) -> AppResult<Option<AffinityHit>> {
     let rules = db.list_affinity_rules().await?;
@@ -61,7 +61,10 @@ pub async fn lookup_affinity(
         let Some(value) = extract_value(&rule, headers, body, context) else {
             continue;
         };
-        let cache_key = format!("{}:{}:{}:{}", rule.name, request.model, rule.group_name, value);
+        let cache_key = format!(
+            "{}:{}:{}:{}",
+            rule.name, request.model, rule.group_name, value
+        );
         let channel_id = if let Some(channel_id) = cache.get(&cache_key).await {
             Some(channel_id)
         } else if let Some(channel_id) = db.get_affinity_binding(&cache_key).await? {
@@ -85,8 +88,13 @@ pub async fn remember_affinity(
     hit: &AffinityHit,
     channel_id: i64,
 ) -> AppResult<()> {
-    db.set_affinity_binding(&hit.cache_key, hit.rule.id, channel_id, hit.rule.ttl_seconds)
-        .await?;
+    db.set_affinity_binding(
+        &hit.cache_key,
+        hit.rule.id,
+        channel_id,
+        hit.rule.ttl_seconds,
+    )
+    .await?;
     cache.put(hit.cache_key.clone(), channel_id).await;
     Ok(())
 }
@@ -135,7 +143,9 @@ fn extract_value(
             "date" => Some(Utc::now().date_naive().to_string()),
             _ => None,
         },
-        "json_path" => simple_json_path(body, &rule.key_source_path).and_then(value_to_key_fragment),
+        "json_path" => {
+            simple_json_path(body, &rule.key_source_path).and_then(value_to_key_fragment)
+        }
         _ => None,
     }
 }

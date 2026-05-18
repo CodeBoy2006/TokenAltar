@@ -3,7 +3,7 @@ use std::time::Duration;
 use axum::{
     Json,
     body::Body,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -20,10 +20,9 @@ use crate::{
     models::{GatewayContext, LedgerEvent, ProviderKind, Usage},
     pricing::{fire_sale_discount, select_price, settle},
     protocol::{
-        ClientProtocol, chat_completion_chunk_to_responses_chunk, extract_usage,
-        general_to_anthropic_messages, general_to_openai_responses, parse_anthropic_messages,
-        parse_openai_chat_completions, parse_openai_responses, response_to_anthropic,
-        response_to_chat_completions, response_to_openai, responses_chunk_to_chat_completion_chunk,
+        ClientProtocol, ProviderProtocol, client_response_body, extract_usage,
+        parse_client_request, provider_protocol, same_wire_protocol, translate_stream_chunk,
+        upstream_body, upstream_path,
     },
     routing::{RouteDecision, choose_channel},
 };
@@ -34,17 +33,7 @@ pub async fn openai_chat_completions(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> AppResult<Response> {
-    let request = parse_openai_chat_completions(body.clone())?;
-    handle_gateway(
-        state,
-        auth,
-        headers,
-        body,
-        request,
-        ClientProtocol::OpenAiChatCompletions,
-        "/v1/chat/completions",
-    )
-    .await
+    handle_gateway(state, auth, headers, body, GatewayEndpoint::openai_chat()).await
 }
 
 pub async fn openai_responses(
@@ -53,15 +42,12 @@ pub async fn openai_responses(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> AppResult<Response> {
-    let request = parse_openai_responses(body.clone())?;
     handle_gateway(
         state,
         auth,
         headers,
         body,
-        request,
-        ClientProtocol::OpenAiResponses,
-        "/v1/responses",
+        GatewayEndpoint::openai_responses(),
     )
     .await
 }
@@ -72,17 +58,98 @@ pub async fn anthropic_messages(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> AppResult<Response> {
-    let request = parse_anthropic_messages(body.clone())?;
     handle_gateway(
         state,
         auth,
         headers,
         body,
-        request,
-        ClientProtocol::AnthropicMessages,
-        "/v1/messages",
+        GatewayEndpoint::anthropic_messages(),
     )
     .await
+}
+
+pub async fn gemini_generate_content(
+    State(state): State<AppState>,
+    GatewayAuth(auth): GatewayAuth,
+    headers: HeaderMap,
+    Path(model_action): Path<String>,
+    Json(body): Json<Value>,
+) -> AppResult<Response> {
+    let (model, action, stream) = parse_gemini_model_action(&model_action)?;
+    handle_gateway(
+        state,
+        auth,
+        headers,
+        body,
+        GatewayEndpoint::gemini(action, model, stream),
+    )
+    .await
+}
+
+#[derive(Debug, Clone)]
+struct GatewayEndpoint {
+    client_protocol: ClientProtocol,
+    request_path: &'static str,
+    path_model: Option<String>,
+    path_stream: Option<bool>,
+}
+
+impl GatewayEndpoint {
+    fn openai_chat() -> Self {
+        Self {
+            client_protocol: ClientProtocol::OpenAiChatCompletions,
+            request_path: "/v1/chat/completions",
+            path_model: None,
+            path_stream: None,
+        }
+    }
+
+    fn openai_responses() -> Self {
+        Self {
+            client_protocol: ClientProtocol::OpenAiResponses,
+            request_path: "/v1/responses",
+            path_model: None,
+            path_stream: None,
+        }
+    }
+
+    fn anthropic_messages() -> Self {
+        Self {
+            client_protocol: ClientProtocol::AnthropicMessages,
+            request_path: "/v1/messages",
+            path_model: None,
+            path_stream: None,
+        }
+    }
+
+    fn gemini(request_path: &'static str, model: String, stream: bool) -> Self {
+        Self {
+            client_protocol: ClientProtocol::GeminiGenerateContent,
+            request_path,
+            path_model: Some(model),
+            path_stream: Some(stream),
+        }
+    }
+}
+
+fn parse_gemini_model_action(model_action: &str) -> AppResult<(String, &'static str, bool)> {
+    let Some((model, action)) = model_action.rsplit_once(':') else {
+        return Err(AppError::BadRequest(
+            "gemini route requires model:generateContent or model:streamGenerateContent"
+                .to_string(),
+        ));
+    };
+    match action {
+        "generateContent" => Ok((model.to_string(), "/v1beta/models/:generateContent", false)),
+        "streamGenerateContent" => Ok((
+            model.to_string(),
+            "/v1beta/models/:streamGenerateContent",
+            true,
+        )),
+        _ => Err(AppError::BadRequest(format!(
+            "unsupported gemini action: {action}"
+        ))),
+    }
 }
 
 async fn handle_gateway(
@@ -90,128 +157,170 @@ async fn handle_gateway(
     auth: crate::models::AuthContext,
     headers: HeaderMap,
     raw_body: Value,
-    request: crate::protocol::GeneralOpenAIRequest,
-    client_protocol: ClientProtocol,
-    request_path: &str,
+    endpoint: GatewayEndpoint,
 ) -> AppResult<Response> {
+    let mut parse_body = raw_body.clone();
+    if let Some(model) = endpoint.path_model {
+        parse_body["_model"] = Value::String(model);
+    }
+    if let Some(stream) = endpoint.path_stream {
+        parse_body["_stream"] = Value::Bool(stream);
+    }
+    let request = parse_client_request(endpoint.client_protocol, &parse_body)?;
     let api_key = auth.api_key.clone().ok_or(AppError::Unauthorized)?;
     state.db.refresh_channel_windows().await?;
     let global_prices = state.db.global_price_book().await?;
     let reserve_price = select_price(&request.model, &global_prices);
     let token_estimate = crate::tokenizer::estimate_request_tokens(&request);
     let reserve = token_estimate.tokens as f64 * reserve_price.input_price_per_1k / 1000.0;
-    if auth.user.points_balance < reserve {
-        return Err(AppError::BadRequest("insufficient points for estimated input tokens".to_string()));
-    }
-    if let Some(limit) = api_key.spend_limit_points
-        && api_key.spent_points + reserve > limit
-    {
-        return Err(AppError::BadRequest("api key spend limit would be exceeded".to_string()));
-    }
+    ensure_affordable(&auth.user, &api_key, reserve)?;
 
     let channels = state.db.list_route_channels().await?;
     let gateway_context = GatewayContext::default();
     let affinity_hit = lookup_affinity(
         &state.db,
         &state.affinity_cache,
-        request_path,
+        endpoint.request_path,
         &headers,
         &raw_body,
         &request,
         &gateway_context,
     )
     .await?;
-    let decision = choose_channel(
-        &channels,
-        &request.model,
-        affinity_hit,
-        &state.router_state,
-    )
-    .await?;
+    let decision =
+        choose_channel(&channels, &request.model, affinity_hit, &state.router_state).await?;
     let price = select_price(
         &request.model,
         &state.db.price_book_for_channel(decision.channel.id).await?,
     );
     let selected_reserve = token_estimate.tokens as f64 * price.input_price_per_1k / 1000.0;
-    if auth.user.points_balance < selected_reserve {
-        return Err(AppError::BadRequest("insufficient points for estimated input tokens".to_string()));
-    }
-    if let Some(limit) = api_key.spend_limit_points
-        && api_key.spent_points + selected_reserve > limit
-    {
-        return Err(AppError::BadRequest("api key spend limit would be exceeded".to_string()));
-    }
+    ensure_affordable(&auth.user, &api_key, selected_reserve)?;
 
     let request_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-    let stream = request.stream;
-    let upstream = send_upstream(&state, &decision, &request, stream).await?;
+    let upstream = send_upstream(
+        &state,
+        &decision,
+        endpoint.client_protocol,
+        &raw_body,
+        &request,
+    )
+    .await?;
 
     if upstream.status() == StatusCode::TOO_MANY_REQUESTS {
         state
             .router_state
             .mark_cooldown(decision.channel.id, Duration::from_secs(30))
             .await;
-        let retry = choose_channel(&channels, &request.model, decision.affinity_hit.clone(), &state.router_state).await?;
+        let retry = choose_channel(
+            &channels,
+            &request.model,
+            decision.affinity_hit.clone(),
+            &state.router_state,
+        )
+        .await?;
         let retry_price = select_price(
             &request.model,
             &state.db.price_book_for_channel(retry.channel.id).await?,
         );
-        let retry_response = send_upstream(&state, &retry, &request, stream).await?;
-        let finish = FinishContext {
-            state,
-            auth,
-            api_key,
-            decision: retry,
-            request,
-            client_protocol,
-            request_id,
-            price: retry_price,
-        };
-        return finish_response(finish, retry_response)
+        let retry_response = send_upstream(
+            &state,
+            &retry,
+            endpoint.client_protocol,
+            &raw_body,
+            &request,
+        )
+        .await?;
+        return finish_response(
+            FinishContext {
+                state,
+                auth,
+                api_key,
+                decision: retry,
+                request,
+                client_protocol: endpoint.client_protocol,
+                request_id,
+                price: retry_price,
+            },
+            retry_response,
+        )
         .await;
     }
 
-    finish_response(FinishContext {
-        state,
-        auth,
-        api_key,
-        decision,
-        request,
-        client_protocol,
-        request_id,
-        price,
-    }, upstream)
+    finish_response(
+        FinishContext {
+            state,
+            auth,
+            api_key,
+            decision,
+            request,
+            client_protocol: endpoint.client_protocol,
+            request_id,
+            price,
+        },
+        upstream,
+    )
     .await
+}
+
+fn ensure_affordable(
+    user: &crate::models::User,
+    api_key: &crate::models::ApiKeyRecord,
+    reserve: f64,
+) -> AppResult<()> {
+    if user.points_balance < reserve {
+        return Err(AppError::BadRequest(
+            "insufficient points for estimated input tokens".to_string(),
+        ));
+    }
+    if let Some(limit) = api_key.spend_limit_points
+        && api_key.spent_points + reserve > limit
+    {
+        return Err(AppError::BadRequest(
+            "api key spend limit would be exceeded".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn send_upstream(
     state: &AppState,
     decision: &RouteDecision,
-    request: &crate::protocol::GeneralOpenAIRequest,
-    stream: bool,
+    client_protocol: ClientProtocol,
+    raw_body: &Value,
+    request: &crate::protocol::TextRequest,
 ) -> AppResult<reqwest::Response> {
-    let (path, body) = match decision.channel.provider {
-        ProviderKind::OpenAi => (
-            "/v1/responses",
-            general_to_openai_responses(request, stream),
-        ),
-        ProviderKind::Anthropic => (
-            "/v1/messages",
-            general_to_anthropic_messages(request, stream),
-        ),
-    };
-    let url = format!("{}{}", decision.channel.base_url.trim_end_matches('/'), path);
-    let mut builder = state
-        .http
-        .post(url)
-        .bearer_auth(&decision.channel.api_key_secret)
-        .json(&body);
-    if decision.channel.provider == ProviderKind::Anthropic {
-        builder = builder
-            .header("anthropic-version", "2023-06-01")
-            .header("x-api-key", &decision.channel.api_key_secret);
+    let provider_protocol = provider_protocol(&decision.channel.provider);
+    let path = upstream_path(provider_protocol, &request.model, request.stream);
+    let body = upstream_body(client_protocol, provider_protocol, raw_body, request);
+    let url = format!(
+        "{}{}",
+        decision.channel.base_url.trim_end_matches('/'),
+        path
+    );
+    let mut builder = state.http.post(url).json(&body);
+    builder = apply_provider_headers(
+        builder,
+        &decision.channel.provider,
+        &decision.channel.api_key_secret,
+    );
+    builder
+        .send()
+        .await
+        .map_err(|err| AppError::Upstream(err.to_string()))
+}
+
+fn apply_provider_headers(
+    builder: reqwest::RequestBuilder,
+    provider: &ProviderKind,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    match provider {
+        ProviderKind::OpenAi => builder.bearer_auth(api_key),
+        ProviderKind::Anthropic => builder
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        ProviderKind::Gemini => builder.header("x-goog-api-key", api_key),
     }
-    builder.send().await.map_err(|err| AppError::Upstream(err.to_string()))
 }
 
 #[derive(Clone)]
@@ -220,7 +329,7 @@ struct FinishContext {
     auth: crate::models::AuthContext,
     api_key: crate::models::ApiKeyRecord,
     decision: RouteDecision,
-    request: crate::protocol::GeneralOpenAIRequest,
+    request: crate::protocol::TextRequest,
     client_protocol: ClientProtocol,
     request_id: String,
     price: crate::models::ModelPrice,
@@ -231,7 +340,7 @@ struct LedgerContext<'a> {
     auth: &'a crate::models::AuthContext,
     api_key: &'a crate::models::ApiKeyRecord,
     decision: &'a RouteDecision,
-    request: &'a crate::protocol::GeneralOpenAIRequest,
+    request: &'a crate::protocol::TextRequest,
     request_id: &'a str,
     price: crate::models::ModelPrice,
 }
@@ -245,6 +354,7 @@ async fn finish_response(
         return finish_streaming_response(finish, upstream).await;
     }
 
+    let provider_protocol = provider_protocol(&finish.decision.channel.provider);
     let value = upstream
         .json::<Value>()
         .await
@@ -252,11 +362,12 @@ async fn finish_response(
     if !status.is_success() {
         return Ok((status, Json(value)).into_response());
     }
-    let (body, usage) = match finish.client_protocol {
-        ClientProtocol::OpenAiChatCompletions => response_to_chat_completions(value),
-        ClientProtocol::OpenAiResponses => response_to_openai(value),
-        ClientProtocol::AnthropicMessages => response_to_anthropic(value),
-    };
+    let (body, usage) = client_response_body(finish.client_protocol, provider_protocol, value);
+    settle_success(&finish, usage).await?;
+    Ok((status, Json(body)).into_response())
+}
+
+async fn settle_success(finish: &FinishContext, usage: Usage) -> AppResult<()> {
     enqueue_ledger(
         LedgerContext {
             state: &finish.state,
@@ -265,7 +376,7 @@ async fn finish_response(
             decision: &finish.decision,
             request: &finish.request,
             request_id: &finish.request_id,
-            price: finish.price,
+            price: finish.price.clone(),
         },
         normalized_usage(&finish.request, usage),
         "success",
@@ -282,7 +393,7 @@ async fn finish_response(
         )
         .await?;
     }
-    Ok((status, Json(body)).into_response())
+    Ok(())
 }
 
 async fn finish_streaming_response(
@@ -290,14 +401,13 @@ async fn finish_streaming_response(
     upstream: reqwest::Response,
 ) -> AppResult<Response> {
     let status = upstream.status();
+    let provider_protocol = provider_protocol(&finish.decision.channel.provider);
     let mut stream = upstream.bytes_stream();
     let mut usage = Usage {
         input_tokens: 0,
         output_tokens: 0,
         cache_tokens: 0,
     };
-    let mut buffer = Vec::<u8>::new();
-
     let finish_for_stream = finish.clone();
 
     let output = async_stream::stream! {
@@ -305,11 +415,10 @@ async fn finish_streaming_response(
             match chunk {
                 Ok(bytes) => {
                     merge_usage_from_sse(&bytes, &mut usage);
-                    buffer.extend_from_slice(&bytes);
                     let bytes = translate_stream_chunk(
                         bytes,
-                        finish_for_stream.decision.channel.provider.clone(),
-                        &finish_for_stream.client_protocol,
+                        provider_protocol,
+                        finish_for_stream.client_protocol,
                         &finish_for_stream.request.model,
                     );
                     yield Ok::<Bytes, std::io::Error>(bytes);
@@ -345,8 +454,6 @@ async fn finish_streaming_response(
                 finish_for_stream.decision.channel.id,
             ).await;
         }
-        let _ = buffer;
-        let _ = &finish_for_stream.client_protocol;
     };
 
     let mut response = Response::new(Body::from_stream(output));
@@ -358,11 +465,7 @@ async fn finish_streaming_response(
     Ok(response)
 }
 
-async fn enqueue_ledger(
-    ctx: LedgerContext<'_>,
-    usage: Usage,
-    status: &str,
-) -> AppResult<()> {
+async fn enqueue_ledger(ctx: LedgerContext<'_>, usage: Usage, status: &str) -> AppResult<()> {
     let surge_multiplier = surge_multiplier(ctx.state).await.0;
     let discount = fire_sale_discount(&ctx.decision.channel);
     let settlement = settle(
@@ -416,7 +519,7 @@ pub async fn surge_multiplier(state: &AppState) -> (f64, &'static str) {
     }
 }
 
-fn normalized_usage(request: &crate::protocol::GeneralOpenAIRequest, usage: Usage) -> Usage {
+fn normalized_usage(request: &crate::protocol::TextRequest, usage: Usage) -> Usage {
     if usage.total() > 0 {
         usage
     } else {
@@ -447,72 +550,7 @@ fn merge_usage_from_sse(bytes: &Bytes, usage: &mut Usage) {
     }
 }
 
-fn translate_stream_chunk(bytes: Bytes, from: ProviderKind, to: &ClientProtocol, model: &str) -> Bytes {
-    let text = String::from_utf8_lossy(&bytes);
-    let mut translated = String::new();
-    let mut changed = false;
-    for line in text.lines() {
-        if let Some(data) = line.strip_prefix("data:") {
-            let data = data.trim();
-            if data == "[DONE]" || data.is_empty() {
-                translated.push_str(line);
-                translated.push('\n');
-                continue;
-            }
-            if let Ok(value) = serde_json::from_str::<Value>(data) {
-                let mapped = match (from.clone(), to) {
-                    (ProviderKind::OpenAi, ClientProtocol::OpenAiChatCompletions) => {
-                        responses_chunk_to_chat_completion_chunk(&value, model)
-                    }
-                    (ProviderKind::Anthropic, ClientProtocol::OpenAiResponses) => {
-                        anthropic_stream_text_delta(&value).map(|delta| {
-                            serde_json::json!({"type": "response.output_text.delta", "delta": delta})
-                        })
-                    }
-                    (ProviderKind::Anthropic, ClientProtocol::OpenAiChatCompletions) => {
-                        anthropic_stream_text_delta(&value).map(|delta| {
-                            serde_json::json!({
-                                "object": "chat.completion.chunk",
-                                "model": model,
-                                "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": null}]
-                            })
-                        })
-                    }
-                    (ProviderKind::OpenAi, ClientProtocol::AnthropicMessages) => {
-                        chat_completion_chunk_to_responses_chunk(&value).or_else(|| {
-                            value.get("delta").and_then(Value::as_str).map(|delta| {
-                                serde_json::json!({"type": "content_block_delta", "delta": {"type": "text_delta", "text": delta}})
-                            })
-                        })
-                    }
-                    _ => None,
-                };
-                if let Some(mapped) = mapped {
-                    translated.push_str("data: ");
-                    translated.push_str(&mapped.to_string());
-                    translated.push_str("\n\n");
-                    changed = true;
-                    continue;
-                }
-            }
-        }
-        translated.push_str(line);
-        translated.push('\n');
-    }
-    if changed {
-        Bytes::from(translated)
-    } else {
-        bytes
-    }
-}
-
-fn anthropic_stream_text_delta(value: &Value) -> Option<&str> {
-    if value.get("type").and_then(Value::as_str) == Some("content_block_delta") {
-        value
-            .get("delta")
-            .and_then(|delta| delta.get("text"))
-            .and_then(Value::as_str)
-    } else {
-        None
-    }
+#[allow(dead_code)]
+fn _same_protocol(client: ClientProtocol, provider: ProviderProtocol) -> bool {
+    same_wire_protocol(client, provider)
 }

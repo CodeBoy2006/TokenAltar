@@ -42,7 +42,9 @@ fn scoped_match(model: &str, prices: &[ModelPrice], channel_scoped: bool) -> Opt
 fn scoped_default(prices: &[ModelPrice], channel_scoped: bool) -> Option<ModelPrice> {
     prices
         .iter()
-        .find(|price| price.channel_id.is_some() == channel_scoped && price.model_pattern == "default")
+        .find(|price| {
+            price.channel_id.is_some() == channel_scoped && price.model_pattern == "default"
+        })
         .cloned()
 }
 

@@ -1,13 +1,14 @@
 # TokenAltar
 
 TokenAltar is a single-process Rust + SQLite gateway for pooling small-circle LLM API capacity.
-It serves an operational Vue console and OpenAI/Anthropic-compatible gateway endpoints from one binary.
+It serves an operational Vue console and OpenAI/Anthropic/Gemini-compatible gateway endpoints from one binary.
 
 ## MVP Features
 
-- `POST /v1/chat/completions`, `POST /v1/responses`, and `POST /v1/messages` with local API-key authentication.
-- OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages adapters through a shared internal chat format.
-- Local tiktoken precheck for OpenAI models, with a deterministic Anthropic proxy estimate and final settlement from upstream `usage`.
+- `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, and Gemini `POST /v1beta/models/{model}:generateContent` text routes with local API-key authentication.
+- OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini Generate Content text adapters through a small shared text format.
+- Same-protocol requests are passed through unchanged to matching upstream channel types; cross-protocol requests are converted only when needed.
+- Local tiktoken precheck for OpenAI models, with deterministic Anthropic/Gemini proxy estimates and final settlement from upstream `usage`.
 - SQLite WAL persistence for users, API keys, owner-scoped channels, global and channel-specific pricing, affinity rules, bindings, social economy, and ledger entries.
 - In-memory routing state for cooldowns, surge metrics, and LRU affinity cache.
 - MPSC ledger queue so gateway requests avoid synchronous high-frequency accounting writes.
@@ -37,8 +38,8 @@ The server listens on `127.0.0.1:8080` by default and stores data in `tokenaltar
 Client requests must use `Authorization: Bearer sk-...`.
 Console sessions use `Authorization: Bearer ta-...`.
 
-MVP protocol conversion supports text messages, `system`, `temperature`, max token controls, and basic tool/function fields.
-Images, files, and reasoning/thinking extensions are rejected or left for same-protocol future work.
+Text protocol conversion supports text messages, `system`, `temperature`, max token controls, and basic tool/function fields across OpenAI, Anthropic, and Gemini.
+Images, files, embeddings, rerank, realtime, audio, and non-text extensions are intentionally outside the current gateway surface.
 
 ## Operational Notes
 

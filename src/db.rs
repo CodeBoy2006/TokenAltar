@@ -71,7 +71,12 @@ impl Database {
         Ok(())
     }
 
-    pub async fn create_user(&self, email: &str, password: &str, display_name: &str) -> AppResult<User> {
+    pub async fn create_user(
+        &self,
+        email: &str,
+        password: &str,
+        display_name: &str,
+    ) -> AppResult<User> {
         let password_hash = hash_password(password)?;
         let result = sqlx::query(
             "INSERT INTO users(email, password_hash, role, display_name, points_balance) VALUES (?, ?, 'user', ?, 1000)",
@@ -138,12 +143,11 @@ impl Database {
 
     pub async fn consume_invite_code(&self, code: &str) -> AppResult<bool> {
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT enabled, max_uses, used_count FROM invite_codes WHERE code = ?",
-        )
-        .bind(code)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let row =
+            sqlx::query("SELECT enabled, max_uses, used_count FROM invite_codes WHERE code = ?")
+                .bind(code)
+                .fetch_optional(&mut *tx)
+                .await?;
         let accepted = if let Some(row) = row {
             let enabled = row.get::<i64, _>("enabled") != 0;
             let max_uses: Option<i64> = row.get("max_uses");
@@ -302,10 +306,14 @@ impl Database {
             .collect()
     }
 
-    pub async fn upsert_channel(&self, owner_user_id: i64, input: ChannelInput) -> AppResult<Channel> {
+    pub async fn upsert_channel(
+        &self,
+        owner_user_id: i64,
+        input: ChannelInput,
+    ) -> AppResult<Channel> {
         let mut tx = self.pool.begin().await?;
-        let models_json =
-            serde_json::to_string(&input.models).map_err(|err| AppError::Anyhow(anyhow::anyhow!(err)))?;
+        let models_json = serde_json::to_string(&input.models)
+            .map_err(|err| AppError::Anyhow(anyhow::anyhow!(err)))?;
         let result = sqlx::query(
             "INSERT INTO channels(owner_user_id, name, provider, base_url, api_key_secret, models_json, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
@@ -579,7 +587,10 @@ impl Database {
         .await?;
         let id = result.last_insert_rowid();
         let rules = self.list_affinity_rules().await?;
-        rules.into_iter().find(|rule| rule.id == id).ok_or(AppError::NotFound)
+        rules
+            .into_iter()
+            .find(|rule| rule.id == id)
+            .ok_or(AppError::NotFound)
     }
 
     pub async fn get_affinity_binding(&self, cache_key: &str) -> AppResult<Option<i64>> {
@@ -683,12 +694,10 @@ impl Database {
 
     pub async fn list_ledger(&self, user_id: Option<i64>) -> AppResult<Vec<serde_json::Value>> {
         let rows = if let Some(user_id) = user_id {
-            sqlx::query(
-                "SELECT * FROM ledger_entries WHERE user_id = ? ORDER BY id DESC LIMIT 200",
-            )
-            .bind(user_id)
-            .fetch_all(&self.pool)
-            .await?
+            sqlx::query("SELECT * FROM ledger_entries WHERE user_id = ? ORDER BY id DESC LIMIT 200")
+                .bind(user_id)
+                .fetch_all(&self.pool)
+                .await?
         } else {
             sqlx::query("SELECT * FROM ledger_entries ORDER BY id DESC LIMIT 200")
                 .fetch_all(&self.pool)
@@ -717,7 +726,11 @@ impl Database {
             .collect())
     }
 
-    pub async fn dashboard(&self, surge_multiplier: f64, surge_state: &str) -> AppResult<DashboardSummary> {
+    pub async fn dashboard(
+        &self,
+        surge_multiplier: f64,
+        surge_state: &str,
+    ) -> AppResult<DashboardSummary> {
         let users: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
             .fetch_one(&self.pool)
             .await?;
@@ -783,11 +796,13 @@ impl Database {
     }
 
     pub async fn set_anonymous_leaderboard(&self, user_id: i64, enabled: bool) -> AppResult<User> {
-        sqlx::query("UPDATE users SET anonymous_leaderboard = ?, updated_at = datetime('now') WHERE id = ?")
-            .bind(if enabled { 1 } else { 0 })
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE users SET anonymous_leaderboard = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(if enabled { 1 } else { 0 })
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
         self.get_user(user_id).await
     }
 
@@ -799,10 +814,14 @@ impl Database {
         memo: Option<&str>,
     ) -> AppResult<()> {
         if from_user_id == to_user_id {
-            return Err(AppError::BadRequest("cannot transfer to yourself".to_string()));
+            return Err(AppError::BadRequest(
+                "cannot transfer to yourself".to_string(),
+            ));
         }
         if points <= 0.0 {
-            return Err(AppError::BadRequest("transfer points must be positive".to_string()));
+            return Err(AppError::BadRequest(
+                "transfer points must be positive".to_string(),
+            ));
         }
         let mut tx = self.pool.begin().await?;
         let balance: f64 = sqlx::query_scalar("SELECT points_balance FROM users WHERE id = ?")
@@ -830,13 +849,15 @@ impl Database {
             .bind(to_user_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("INSERT INTO transfers(from_user_id, to_user_id, points, memo) VALUES (?, ?, ?, ?)")
-            .bind(from_user_id)
-            .bind(to_user_id)
-            .bind(points)
-            .bind(memo)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO transfers(from_user_id, to_user_id, points, memo) VALUES (?, ?, ?, ?)",
+        )
+        .bind(from_user_id)
+        .bind(to_user_id)
+        .bind(points)
+        .bind(memo)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -883,13 +904,19 @@ impl Database {
         mode: &str,
     ) -> AppResult<()> {
         if phrase.trim().len() < 3 {
-            return Err(AppError::BadRequest("phrase must be at least 3 characters".to_string()));
+            return Err(AppError::BadRequest(
+                "phrase must be at least 3 characters".to_string(),
+            ));
         }
         if total_points <= 0.0 || total_parts <= 0 {
-            return Err(AppError::BadRequest("red packet points and parts must be positive".to_string()));
+            return Err(AppError::BadRequest(
+                "red packet points and parts must be positive".to_string(),
+            ));
         }
         if !matches!(mode, "even" | "lucky") {
-            return Err(AppError::BadRequest("mode must be even or lucky".to_string()));
+            return Err(AppError::BadRequest(
+                "mode must be even or lucky".to_string(),
+            ));
         }
         let mut tx = self.pool.begin().await?;
         let balance: f64 = sqlx::query_scalar("SELECT points_balance FROM users WHERE id = ?")
@@ -933,14 +960,17 @@ impl Database {
         let total_parts: i64 = row.get("total_parts");
         let claimed_parts: i64 = row.get("claimed_parts");
         let mode: String = row.get("mode");
-        let already: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM red_packet_claims WHERE red_packet_id = ? AND user_id = ?")
-                .bind(packet_id)
-                .bind(user_id)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let already: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM red_packet_claims WHERE red_packet_id = ? AND user_id = ?",
+        )
+        .bind(packet_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
         if already.is_some() {
-            return Err(AppError::BadRequest("red packet already claimed".to_string()));
+            return Err(AppError::BadRequest(
+                "red packet already claimed".to_string(),
+            ));
         }
         let remaining_parts = total_parts - claimed_parts;
         if remaining_parts <= 0 || remaining_points <= 0.0 {
@@ -965,12 +995,14 @@ impl Database {
         if result.rows_affected() == 0 {
             return Err(AppError::BadRequest("red packet exhausted".to_string()));
         }
-        sqlx::query("INSERT INTO red_packet_claims(red_packet_id, user_id, points) VALUES (?, ?, ?)")
-            .bind(packet_id)
-            .bind(user_id)
-            .bind(points)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO red_packet_claims(red_packet_id, user_id, points) VALUES (?, ?, ?)",
+        )
+        .bind(packet_id)
+        .bind(user_id)
+        .bind(points)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("UPDATE users SET points_balance = points_balance + ? WHERE id = ?")
             .bind(points)
             .bind(user_id)

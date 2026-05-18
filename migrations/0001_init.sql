@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS channels (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
-  provider TEXT NOT NULL CHECK (provider IN ('openai', 'anthropic')),
+  provider TEXT NOT NULL CHECK (provider IN ('openai', 'anthropic', 'gemini')),
   base_url TEXT NOT NULL,
   api_key_secret TEXT NOT NULL,
   models_json TEXT NOT NULL,

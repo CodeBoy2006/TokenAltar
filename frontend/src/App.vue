@@ -469,7 +469,7 @@ onMounted(refreshAll)
           <div class="toolbar"><div><h3>Add upstream capacity</h3><p>Monthly, daily, and hourly token buckets drive routing.</p></div><button @click="createChannel">Add Channel</button></div>
           <div class="form-grid panel">
             <label>Name <input v-model="channelForm.name" /></label>
-            <label>Provider <select v-model="channelForm.provider"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select></label>
+            <label>Provider <select v-model="channelForm.provider"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option></select></label>
             <label>Base URL <input v-model="channelForm.base_url" /></label>
             <label>API Key <input v-model="channelForm.api_key_secret" type="password" /></label>
             <label>Models <input v-model="channelForm.models" /></label>

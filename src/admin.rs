@@ -69,7 +69,9 @@ pub async fn register(
     Json(request): Json<RegisterRequest>,
 ) -> AppResult<Json<AuthResponse>> {
     if request.password.len() < 8 {
-        return Err(AppError::BadRequest("password must be at least 8 characters".to_string()));
+        return Err(AppError::BadRequest(
+            "password must be at least 8 characters".to_string(),
+        ));
     }
     let invite_required = sqlx::query_scalar::<_, String>(
         "SELECT value FROM system_settings WHERE key = 'invite_required'",
@@ -86,9 +88,14 @@ pub async fn register(
             return Err(AppError::Forbidden);
         }
     }
-    let display_name = request
-        .display_name
-        .unwrap_or_else(|| request.email.split('@').next().unwrap_or("user").to_string());
+    let display_name = request.display_name.unwrap_or_else(|| {
+        request
+            .email
+            .split('@')
+            .next()
+            .unwrap_or("user")
+            .to_string()
+    });
     let user = state
         .db
         .create_user(&request.email, &request.password, &display_name)
@@ -153,7 +160,9 @@ pub async fn list_channels(
     ConsoleAuth(auth): ConsoleAuth,
 ) -> AppResult<Json<serde_json::Value>> {
     state.db.refresh_channel_windows().await?;
-    Ok(Json(json!(state.db.list_public_channels(&auth.user).await?)))
+    Ok(Json(json!(
+        state.db.list_public_channels(&auth.user).await?
+    )))
 }
 
 pub async fn create_channel(

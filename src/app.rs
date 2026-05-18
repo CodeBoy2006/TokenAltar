@@ -66,17 +66,44 @@ pub fn build_router(state: AppState, config: &Config) -> Router {
         .route("/auth/register", post(crate::admin::register))
         .route("/auth/login", post(crate::admin::login))
         .route("/me", get(crate::admin::me))
-        .route("/api-keys", get(crate::admin::list_api_keys).post(crate::admin::create_api_key))
-        .route("/api-keys/{id}/enabled", post(crate::admin::set_api_key_enabled))
-        .route("/channels", get(crate::admin::list_channels).post(crate::admin::create_channel))
-        .route("/prices", get(crate::admin::list_prices).post(crate::admin::upsert_price))
-        .route("/affinity-rules", get(crate::admin::list_affinity_rules).post(crate::admin::create_affinity_rule))
+        .route(
+            "/api-keys",
+            get(crate::admin::list_api_keys).post(crate::admin::create_api_key),
+        )
+        .route(
+            "/api-keys/{id}/enabled",
+            post(crate::admin::set_api_key_enabled),
+        )
+        .route(
+            "/channels",
+            get(crate::admin::list_channels).post(crate::admin::create_channel),
+        )
+        .route(
+            "/prices",
+            get(crate::admin::list_prices).post(crate::admin::upsert_price),
+        )
+        .route(
+            "/affinity-rules",
+            get(crate::admin::list_affinity_rules).post(crate::admin::create_affinity_rule),
+        )
         .route("/ledger", get(crate::admin::list_ledger))
         .route("/dashboard", get(crate::admin::dashboard))
-        .route("/settings", get(crate::admin::get_settings).post(crate::admin::update_settings))
-        .route("/profile/anonymous-leaderboard", post(crate::admin::set_anonymous_leaderboard))
-        .route("/transfers", get(crate::admin::list_transfers).post(crate::admin::transfer_points))
-        .route("/red-packets", get(crate::admin::list_red_packets).post(crate::admin::create_red_packet))
+        .route(
+            "/settings",
+            get(crate::admin::get_settings).post(crate::admin::update_settings),
+        )
+        .route(
+            "/profile/anonymous-leaderboard",
+            post(crate::admin::set_anonymous_leaderboard),
+        )
+        .route(
+            "/transfers",
+            get(crate::admin::list_transfers).post(crate::admin::transfer_points),
+        )
+        .route(
+            "/red-packets",
+            get(crate::admin::list_red_packets).post(crate::admin::create_red_packet),
+        )
         .route("/red-packets/claim", post(crate::admin::claim_red_packet))
         .route("/leaderboards", get(crate::admin::leaderboards));
 
@@ -85,9 +112,16 @@ pub fn build_router(state: AppState, config: &Config) -> Router {
 
     Router::new()
         .nest("/api", api)
-        .route("/v1/chat/completions", post(gateway::openai_chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(gateway::openai_chat_completions),
+        )
         .route("/v1/responses", post(gateway::openai_responses))
         .route("/v1/messages", post(gateway::anthropic_messages))
+        .route(
+            "/v1beta/models/{model_action}",
+            post(gateway::gemini_generate_content),
+        )
         .fallback_service(static_service)
         .with_state(state)
         .layer(cors)
@@ -97,7 +131,9 @@ pub fn build_router(state: AppState, config: &Config) -> Router {
 pub fn copy_passthrough_headers(headers: &axum::http::HeaderMap) -> axum::http::HeaderMap {
     let mut outbound = axum::http::HeaderMap::new();
     for name in ["user-agent", "x-request-id"] {
-        if let (Ok(header_name), Some(value)) = (HeaderName::from_bytes(name.as_bytes()), headers.get(name)) {
+        if let (Ok(header_name), Some(value)) =
+            (HeaderName::from_bytes(name.as_bytes()), headers.get(name))
+        {
             outbound.insert(header_name, value.clone());
         }
     }

@@ -85,7 +85,9 @@ async fn anthropic_messages_gateway_converts_response_shape() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["type"], "message");
     assert_eq!(value["content"][0]["text"], "anthropic ok");
@@ -126,7 +128,9 @@ async fn chat_completions_gateway_converts_response_shape_and_records_tokenizer(
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["object"], "chat.completion");
     assert_eq!(value["choices"][0]["message"]["content"], "chat ok");
@@ -146,10 +150,12 @@ async fn exhausted_channel_is_marked_unavailable() {
     }))
     .await;
     let (state, token) = setup_state(upstream).await;
-    sqlx::query("UPDATE channel_limits SET used_cycle_tokens = cycle_limit_tokens WHERE channel_id = 1")
-        .execute(&state.db.pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE channel_limits SET used_cycle_tokens = cycle_limit_tokens WHERE channel_id = 1",
+    )
+    .execute(&state.db.pool)
+    .await
+    .unwrap();
     state.db.refresh_channel_windows().await.unwrap();
     let app = build_router(state, &test_config("unused"));
     let response = app
@@ -230,7 +236,133 @@ async fn channel_price_override_is_used_for_settlement() {
     assert_eq!(row.1, 20.0);
 }
 
+#[tokio::test]
+async fn openai_responses_to_openai_channel_is_passthrough() {
+    let upstream = spawn_echo_upstream().await;
+    let (state, token) = setup_state(upstream).await;
+    let app = build_router(state.clone(), &test_config("unused"));
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({
+                        "model": "gpt-test",
+                        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                        "metadata": {"passthrough_marker": true},
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["output"][0]["content"][0]["text"], "saw-passthrough");
+    assert_eq!(value["usage"]["input_tokens"], 11);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let ledger = state.db.list_ledger(None).await.unwrap();
+    assert_eq!(ledger[0]["input_tokens"], 11);
+    assert_eq!(ledger[0]["output_tokens"], 2);
+}
+
+#[tokio::test]
+async fn openai_chat_can_route_to_gemini_text_channel() {
+    let upstream = spawn_gemini_echo_upstream().await;
+    let (state, token) = setup_state_with_provider(upstream, "gemini").await;
+    let app = build_router(state.clone(), &test_config("unused"));
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({
+                        "model": "gemini-test",
+                        "messages": [{"role": "user", "content": "hello gemini"}],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["object"], "chat.completion");
+    assert_eq!(value["choices"][0]["message"]["content"], "gemini ok");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let ledger = state.db.list_ledger(None).await.unwrap();
+    assert_eq!(ledger[0]["input_tokens"], 7);
+    assert_eq!(ledger[0]["output_tokens"], 3);
+}
+
+#[tokio::test]
+async fn gemini_to_gemini_channel_is_passthrough_without_internal_fields() {
+    let upstream = spawn_gemini_passthrough_upstream().await;
+    let (state, token) = setup_state_with_provider(upstream, "gemini").await;
+    let app = build_router(state.clone(), &test_config("unused"));
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/gemini-test:generateContent")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({
+                        "contents": [{
+                            "role": "user",
+                            "parts": [{"text": "direct gemini"}]
+                        }],
+                        "generationConfig": {"temperature": 0.2}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["candidates"][0]["content"]["parts"][0]["text"],
+        "direct ok"
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let ledger = state.db.list_ledger(None).await.unwrap();
+    assert_eq!(ledger[0]["input_tokens"], 5);
+    assert_eq!(ledger[0]["output_tokens"], 2);
+}
+
 async fn setup_state(upstream: String) -> (AppState, String) {
+    setup_state_with_provider(upstream, "openai").await
+}
+
+async fn setup_state_with_provider(upstream: String, provider: &str) -> (AppState, String) {
     let config = test_config("sqlite::memory:");
     let state = AppState::new(&config).await.unwrap();
     state
@@ -256,7 +388,7 @@ async fn setup_state(upstream: String) -> (AppState, String) {
             user.id,
             ChannelInput {
                 name: "test".to_string(),
-                provider: "openai".to_string(),
+                provider: provider.to_string(),
                 base_url: upstream,
                 api_key_secret: "upstream-key".to_string(),
                 models: vec!["*".to_string()],
@@ -291,11 +423,96 @@ async fn spawn_upstream(body: Value) -> String {
         Json(body)
     }
     let app = Router::new()
-        .route("/v1/responses", post({
-            let body = body.clone();
-            move || async move { Json(body.clone()) }
-        }))
+        .route(
+            "/v1/responses",
+            post({
+                let body = body.clone();
+                move || async move { Json(body.clone()) }
+            }),
+        )
         .route("/v1/messages", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn spawn_echo_upstream() -> String {
+    async fn responses(Json(body): Json<Value>) -> Json<Value> {
+        let saw_marker = body
+            .get("metadata")
+            .and_then(|metadata| metadata.get("passthrough_marker"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Json(json!({
+            "id": "resp_echo",
+            "model": body.get("model").cloned().unwrap_or_else(|| json!("unknown")),
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": if saw_marker { "saw-passthrough" } else { "converted" }}]
+            }],
+            "usage": {"input_tokens": 11, "output_tokens": 2}
+        }))
+    }
+    let app = Router::new().route("/v1/responses", post(responses));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn spawn_gemini_echo_upstream() -> String {
+    async fn generate(Json(body): Json<Value>) -> Json<Value> {
+        assert_eq!(body["contents"][0]["parts"][0]["text"], "hello gemini");
+        Json(json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": "gemini ok"}]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 7,
+                "candidatesTokenCount": 3,
+                "totalTokenCount": 10
+            }
+        }))
+    }
+    let app = Router::new().route("/v1beta/models/{model_action}", post(generate));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn spawn_gemini_passthrough_upstream() -> String {
+    async fn generate(Json(body): Json<Value>) -> Json<Value> {
+        assert!(body.get("_model").is_none());
+        assert!(body.get("_stream").is_none());
+        assert_eq!(body["contents"][0]["parts"][0]["text"], "direct gemini");
+        Json(json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": "direct ok"}]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 5,
+                "candidatesTokenCount": 2,
+                "totalTokenCount": 7
+            }
+        }))
+    }
+    let app = Router::new().route("/v1beta/models/{model_action}", post(generate));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     tokio::spawn(async move {
