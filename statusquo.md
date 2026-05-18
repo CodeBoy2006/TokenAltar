@@ -71,3 +71,9 @@
 - **Status:** Completed
 - **Next Steps:** Confirm production billing reset timezone expectations if they should differ from the existing UTC channel-window logic.
 - **Context:** Targeted pricing tests cover in-window, out-of-window, reset-day, and remaining-threshold behavior.
+
+## [2026-05-18 22:32] Affinity Cache TTL Fix
+- **Changes:** Stored affinity expiration timestamps inside the in-memory LRU cache and dropped expired cache hits before routing.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** SQLite affinity bindings remain the source of truth; the cache now mirrors DB TTL instead of treating a cached channel ID as permanent.

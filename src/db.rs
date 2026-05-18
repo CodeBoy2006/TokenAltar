@@ -946,14 +946,14 @@ impl Database {
             .ok_or(AppError::NotFound)
     }
 
-    pub async fn get_affinity_binding(&self, cache_key: &str) -> AppResult<Option<i64>> {
+    pub async fn get_affinity_binding(&self, cache_key: &str) -> AppResult<Option<(i64, String)>> {
         let row = sqlx::query(
-            "SELECT channel_id FROM affinity_bindings WHERE cache_key = ? AND expires_at > datetime('now')",
+            "SELECT channel_id, expires_at FROM affinity_bindings WHERE cache_key = ? AND expires_at > datetime('now')",
         )
         .bind(cache_key)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|row| row.get("channel_id")))
+        Ok(row.map(|row| (row.get("channel_id"), row.get("expires_at"))))
     }
 
     pub async fn set_affinity_binding(
@@ -962,7 +962,7 @@ impl Database {
         rule_id: i64,
         channel_id: i64,
         ttl_seconds: i64,
-    ) -> AppResult<()> {
+    ) -> AppResult<String> {
         let expires_at = (Utc::now() + chrono::Duration::seconds(ttl_seconds)).to_rfc3339();
         sqlx::query(
             r#"
@@ -978,10 +978,10 @@ impl Database {
         .bind(cache_key)
         .bind(rule_id)
         .bind(channel_id)
-        .bind(expires_at)
+        .bind(&expires_at)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(expires_at)
     }
 
     pub async fn apply_ledger_event(&self, event: &LedgerEvent) -> AppResult<()> {

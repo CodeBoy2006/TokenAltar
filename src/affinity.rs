@@ -1,7 +1,7 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use axum::http::HeaderMap;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use lru::LruCache;
 use regex::Regex;
 use serde_json::Value;
@@ -16,7 +16,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AffinityCache {
-    inner: Arc<Mutex<LruCache<String, i64>>>,
+    inner: Arc<Mutex<LruCache<String, CachedAffinity>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +24,12 @@ pub struct AffinityHit {
     pub cache_key: String,
     pub rule: AffinityRule,
     pub channel_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedAffinity {
+    channel_id: i64,
+    expires_at: DateTime<Utc>,
 }
 
 impl AffinityCache {
@@ -36,11 +42,26 @@ impl AffinityCache {
     }
 
     pub async fn get(&self, key: &str) -> Option<i64> {
-        self.inner.lock().await.get(key).copied()
+        let mut inner = self.inner.lock().await;
+        let Some(entry) = inner.get(key).cloned() else {
+            return None;
+        };
+        if entry.expires_at > Utc::now() {
+            Some(entry.channel_id)
+        } else {
+            inner.pop(key);
+            None
+        }
     }
 
-    pub async fn put(&self, key: String, channel_id: i64) {
-        self.inner.lock().await.put(key, channel_id);
+    pub async fn put(&self, key: String, channel_id: i64, expires_at: DateTime<Utc>) {
+        self.inner.lock().await.put(
+            key,
+            CachedAffinity {
+                channel_id,
+                expires_at,
+            },
+        );
     }
 }
 
@@ -67,8 +88,12 @@ pub async fn lookup_affinity(
         );
         let channel_id = if let Some(channel_id) = cache.get(&cache_key).await {
             Some(channel_id)
-        } else if let Some(channel_id) = db.get_affinity_binding(&cache_key).await? {
-            cache.put(cache_key.clone(), channel_id).await;
+        } else if let Some((channel_id, expires_at)) = db.get_affinity_binding(&cache_key).await? {
+            if let Ok(expires_at) = DateTime::parse_from_rfc3339(&expires_at) {
+                cache
+                    .put(cache_key.clone(), channel_id, expires_at.with_timezone(&Utc))
+                    .await;
+            }
             Some(channel_id)
         } else {
             None
@@ -88,14 +113,19 @@ pub async fn remember_affinity(
     hit: &AffinityHit,
     channel_id: i64,
 ) -> AppResult<()> {
-    db.set_affinity_binding(
-        &hit.cache_key,
-        hit.rule.id,
-        channel_id,
-        hit.rule.ttl_seconds,
-    )
-    .await?;
-    cache.put(hit.cache_key.clone(), channel_id).await;
+    let expires_at = db
+        .set_affinity_binding(
+            &hit.cache_key,
+            hit.rule.id,
+            channel_id,
+            hit.rule.ttl_seconds,
+        )
+        .await?;
+    if let Ok(expires_at) = DateTime::parse_from_rfc3339(&expires_at) {
+        cache
+            .put(hit.cache_key.clone(), channel_id, expires_at.with_timezone(&Utc))
+            .await;
+    }
     Ok(())
 }
 
@@ -192,5 +222,27 @@ mod tests {
             simple_json_path(&value, "messages[0].content").unwrap(),
             "hello"
         );
+    }
+
+    #[tokio::test]
+    async fn cache_drops_expired_affinity_entries() {
+        let cache = AffinityCache::new(2);
+        cache
+            .put(
+                "expired".to_string(),
+                7,
+                Utc::now() - chrono::Duration::seconds(1),
+            )
+            .await;
+        assert_eq!(cache.get("expired").await, None);
+
+        cache
+            .put(
+                "fresh".to_string(),
+                9,
+                Utc::now() + chrono::Duration::seconds(60),
+            )
+            .await;
+        assert_eq!(cache.get("fresh").await, Some(9));
     }
 }
