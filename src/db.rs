@@ -13,8 +13,8 @@ use crate::{
     auth::{generate_token, hash_password, hash_token},
     error::{AppError, AppResult},
     models::{
-        AffinityRule, ApiKeyRecord, Channel, ChannelLimits, LedgerEvent, ModelPrice, User,
-        json_array_to_strings,
+        AffinityRule, ApiKeyRecord, Channel, ChannelLimits, LedgerEvent, ModelPrice, PublicChannel,
+        User, json_array_to_strings,
     },
 };
 
@@ -247,7 +247,7 @@ impl Database {
         Ok(api_key_from_row(&row))
     }
 
-    pub async fn list_channels(&self) -> AppResult<Vec<Channel>> {
+    pub async fn list_route_channels(&self) -> AppResult<Vec<Channel>> {
         let rows = sqlx::query(
             r#"
             SELECT c.id, c.owner_user_id, c.name, c.provider, c.base_url, c.api_key_secret, c.models_json,
@@ -262,6 +262,44 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(channel_from_row).collect()
+    }
+
+    pub async fn list_public_channels(&self, user: &User) -> AppResult<Vec<PublicChannel>> {
+        let rows = if user.role == "admin" {
+            sqlx::query(
+                r#"
+                SELECT c.id, c.owner_user_id, c.name, c.provider, c.base_url, c.api_key_secret, c.models_json,
+                       c.enabled, c.status,
+                       l.cycle_limit_tokens, l.cycle_reset_day, l.daily_limit_tokens, l.hourly_limit_tokens,
+                       l.used_cycle_tokens, l.used_day_tokens, l.used_hour_tokens,
+                       l.fire_sale_days_before, l.fire_sale_remaining_pct, l.fire_sale_discount, l.provider_share
+                FROM channels c JOIN channel_limits l ON c.id = l.channel_id
+                ORDER BY c.id DESC
+                "#,
+            )
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT c.id, c.owner_user_id, c.name, c.provider, c.base_url, c.api_key_secret, c.models_json,
+                       c.enabled, c.status,
+                       l.cycle_limit_tokens, l.cycle_reset_day, l.daily_limit_tokens, l.hourly_limit_tokens,
+                       l.used_cycle_tokens, l.used_day_tokens, l.used_hour_tokens,
+                       l.fire_sale_days_before, l.fire_sale_remaining_pct, l.fire_sale_discount, l.provider_share
+                FROM channels c JOIN channel_limits l ON c.id = l.channel_id
+                WHERE c.owner_user_id = ?
+                ORDER BY c.id DESC
+                "#,
+            )
+            .bind(user.id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        rows.iter()
+            .map(channel_from_row)
+            .map(|result| result.map(PublicChannel::from))
+            .collect()
     }
 
     pub async fn upsert_channel(&self, owner_user_id: i64, input: ChannelInput) -> AppResult<Channel> {
@@ -323,15 +361,82 @@ impl Database {
         channel_from_row(&row)
     }
 
-    pub async fn list_prices(&self) -> AppResult<Vec<ModelPrice>> {
+    pub async fn list_prices(&self, user: &User) -> AppResult<Vec<ModelPrice>> {
+        let rows = if user.role == "admin" {
+            sqlx::query(
+                r#"
+                SELECT channel_id, model_pattern, input_price_per_1k, output_price_per_1k, cache_price_per_1k
+                FROM model_prices
+                ORDER BY channel_id IS NOT NULL, channel_id, id
+                "#,
+            )
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT p.channel_id, p.model_pattern, p.input_price_per_1k, p.output_price_per_1k, p.cache_price_per_1k
+                FROM model_prices p
+                LEFT JOIN channels c ON p.channel_id = c.id
+                WHERE p.channel_id IS NULL OR c.owner_user_id = ?
+                ORDER BY p.channel_id IS NOT NULL, p.channel_id, p.id
+                "#,
+            )
+            .bind(user.id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows
+            .iter()
+            .map(|row| ModelPrice {
+                channel_id: row.get("channel_id"),
+                model_pattern: row.get("model_pattern"),
+                input_price_per_1k: row.get("input_price_per_1k"),
+                output_price_per_1k: row.get("output_price_per_1k"),
+                cache_price_per_1k: row.get("cache_price_per_1k"),
+            })
+            .collect())
+    }
+
+    pub async fn price_book_for_channel(&self, channel_id: i64) -> AppResult<Vec<ModelPrice>> {
         let rows = sqlx::query(
-            "SELECT model_pattern, input_price_per_1k, output_price_per_1k, cache_price_per_1k FROM model_prices ORDER BY id",
+            r#"
+            SELECT channel_id, model_pattern, input_price_per_1k, output_price_per_1k, cache_price_per_1k
+            FROM model_prices
+            WHERE channel_id IS NULL OR channel_id = ?
+            ORDER BY channel_id IS NULL, id
+            "#,
+        )
+        .bind(channel_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| ModelPrice {
+                channel_id: row.get("channel_id"),
+                model_pattern: row.get("model_pattern"),
+                input_price_per_1k: row.get("input_price_per_1k"),
+                output_price_per_1k: row.get("output_price_per_1k"),
+                cache_price_per_1k: row.get("cache_price_per_1k"),
+            })
+            .collect())
+    }
+
+    pub async fn global_price_book(&self) -> AppResult<Vec<ModelPrice>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT channel_id, model_pattern, input_price_per_1k, output_price_per_1k, cache_price_per_1k
+            FROM model_prices
+            WHERE channel_id IS NULL
+            ORDER BY id
+            "#,
         )
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
             .iter()
             .map(|row| ModelPrice {
+                channel_id: row.get("channel_id"),
                 model_pattern: row.get("model_pattern"),
                 input_price_per_1k: row.get("input_price_per_1k"),
                 output_price_per_1k: row.get("output_price_per_1k"),
@@ -398,22 +503,42 @@ impl Database {
     }
 
     pub async fn upsert_price(&self, price: &ModelPrice) -> AppResult<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO model_prices(model_pattern, input_price_per_1k, output_price_per_1k, cache_price_per_1k)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(model_pattern) DO UPDATE SET
-              input_price_per_1k = excluded.input_price_per_1k,
-              output_price_per_1k = excluded.output_price_per_1k,
-              cache_price_per_1k = excluded.cache_price_per_1k
-            "#,
-        )
-        .bind(&price.model_pattern)
-        .bind(price.input_price_per_1k)
-        .bind(price.output_price_per_1k)
-        .bind(price.cache_price_per_1k)
-        .execute(&self.pool)
-        .await?;
+        if let Some(channel_id) = price.channel_id {
+            sqlx::query(
+                r#"
+                INSERT INTO model_prices(channel_id, model_pattern, input_price_per_1k, output_price_per_1k, cache_price_per_1k)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(channel_id, model_pattern) DO UPDATE SET
+                  input_price_per_1k = excluded.input_price_per_1k,
+                  output_price_per_1k = excluded.output_price_per_1k,
+                  cache_price_per_1k = excluded.cache_price_per_1k
+                "#,
+            )
+            .bind(channel_id)
+            .bind(&price.model_pattern)
+            .bind(price.input_price_per_1k)
+            .bind(price.output_price_per_1k)
+            .bind(price.cache_price_per_1k)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO model_prices(channel_id, model_pattern, input_price_per_1k, output_price_per_1k, cache_price_per_1k)
+                VALUES (NULL, ?, ?, ?, ?)
+                ON CONFLICT(model_pattern) WHERE channel_id IS NULL DO UPDATE SET
+                  input_price_per_1k = excluded.input_price_per_1k,
+                  output_price_per_1k = excluded.output_price_per_1k,
+                  cache_price_per_1k = excluded.cache_price_per_1k
+                "#,
+            )
+            .bind(&price.model_pattern)
+            .bind(price.input_price_per_1k)
+            .bind(price.output_price_per_1k)
+            .bind(price.cache_price_per_1k)
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 

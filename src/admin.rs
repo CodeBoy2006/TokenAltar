@@ -150,10 +150,10 @@ pub async fn set_api_key_enabled(
 
 pub async fn list_channels(
     State(state): State<crate::app::AppState>,
-    ConsoleAuth(_auth): ConsoleAuth,
+    ConsoleAuth(auth): ConsoleAuth,
 ) -> AppResult<Json<serde_json::Value>> {
     state.db.refresh_channel_windows().await?;
-    Ok(Json(json!(state.db.list_channels().await?)))
+    Ok(Json(json!(state.db.list_public_channels(&auth.user).await?)))
 }
 
 pub async fn create_channel(
@@ -161,16 +161,15 @@ pub async fn create_channel(
     ConsoleAuth(auth): ConsoleAuth,
     Json(request): Json<ChannelInput>,
 ) -> AppResult<Json<serde_json::Value>> {
-    require_admin(&auth.user)?;
     let channel = state.db.upsert_channel(auth.user.id, request).await?;
-    Ok(Json(json!(channel)))
+    Ok(Json(json!(crate::models::PublicChannel::from(channel))))
 }
 
 pub async fn list_prices(
     State(state): State<crate::app::AppState>,
-    ConsoleAuth(_auth): ConsoleAuth,
+    ConsoleAuth(auth): ConsoleAuth,
 ) -> AppResult<Json<serde_json::Value>> {
-    Ok(Json(json!(state.db.list_prices().await?)))
+    Ok(Json(json!(state.db.list_prices(&auth.user).await?)))
 }
 
 pub async fn upsert_price(
@@ -178,7 +177,14 @@ pub async fn upsert_price(
     ConsoleAuth(auth): ConsoleAuth,
     Json(request): Json<ModelPrice>,
 ) -> AppResult<Json<serde_json::Value>> {
-    require_admin(&auth.user)?;
+    if let Some(channel_id) = request.channel_id {
+        let channel = state.db.get_channel(channel_id).await?;
+        if auth.user.role != "admin" && channel.owner_user_id != auth.user.id {
+            return Err(AppError::Forbidden);
+        }
+    } else {
+        require_admin(&auth.user)?;
+    }
     state.db.upsert_price(&request).await?;
     Ok(Json(json!({ "ok": true })))
 }

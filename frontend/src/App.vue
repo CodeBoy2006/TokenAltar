@@ -71,6 +71,7 @@ const channelForm = reactive({
   provider_share: 0.7,
 })
 const priceForm = reactive({
+  channel_id: null as number | null,
   model_pattern: 'default',
   input_price_per_1k: 1,
   output_price_per_1k: 3,
@@ -235,7 +236,12 @@ async function refreshAll() {
 
 async function loadDashboard() { dashboard.value = await api('/dashboard') }
 async function loadApiKeys() { apiKeys.value = await api('/api-keys') }
-async function loadChannels() { channels.value = await api('/channels') }
+async function loadChannels() {
+  channels.value = await api('/channels')
+  if (!isAdmin.value && !priceForm.channel_id && channels.value.length > 0) {
+    priceForm.channel_id = channels.value[0].id
+  }
+}
 async function loadPrices() { prices.value = await api('/prices') }
 async function loadRules() { rules.value = await api('/affinity-rules') }
 async function loadLedger() { ledger.value = await api('/ledger') }
@@ -276,11 +282,19 @@ async function createChannel() {
   })
   channelForm.api_key_secret = ''
   await Promise.all([loadChannels(), loadDashboard()])
+  if (!isAdmin.value && !priceForm.channel_id && channels.value.length > 0) {
+    priceForm.channel_id = channels.value[0].id
+  }
 }
 
 async function savePrice() {
   await api('/prices', { method: 'POST', body: JSON.stringify(priceForm) })
   await loadPrices()
+}
+
+function priceScope(price: any) {
+  if (!price.channel_id) return 'Global'
+  return channels.value.find((channel) => channel.id === price.channel_id)?.name || `Channel #${price.channel_id}`
 }
 
 async function createRule() {
@@ -452,7 +466,7 @@ onMounted(refreshAll)
         </section>
 
         <section v-if="activeTab === 'channels'">
-          <div class="toolbar"><div><h3>Add upstream capacity</h3><p>Monthly, daily, and hourly token buckets drive routing.</p></div><button :disabled="!isAdmin" @click="createChannel">Add Channel</button></div>
+          <div class="toolbar"><div><h3>Add upstream capacity</h3><p>Monthly, daily, and hourly token buckets drive routing.</p></div><button @click="createChannel">Add Channel</button></div>
           <div class="form-grid panel">
             <label>Name <input v-model="channelForm.name" /></label>
             <label>Provider <select v-model="channelForm.provider"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select></label>
@@ -473,15 +487,16 @@ onMounted(refreshAll)
         </section>
 
         <section v-if="activeTab === 'prices'">
-          <div class="toolbar"><div><h3>Settle model cost</h3><p>Regex patterns match models before the default price.</p></div><button :disabled="!isAdmin" @click="savePrice">Save</button></div>
+          <div class="toolbar"><div><h3>Settle model cost</h3><p>Channel prices override global model defaults.</p></div><button @click="savePrice">Save</button></div>
           <div class="form-grid compact panel">
+            <label>Scope <select v-model="priceForm.channel_id"><option v-if="isAdmin" :value="null">Global default</option><option v-for="channel in channels" :key="channel.id" :value="channel.id">{{ channel.name }}</option></select></label>
             <label>Model Pattern <input v-model="priceForm.model_pattern" /></label>
             <label>Input / 1k <input v-model.number="priceForm.input_price_per_1k" type="number" step="0.01" /></label>
             <label>Output / 1k <input v-model.number="priceForm.output_price_per_1k" type="number" step="0.01" /></label>
             <label>Cache / 1k <input v-model.number="priceForm.cache_price_per_1k" type="number" step="0.01" /></label>
           </div>
           <div class="table-shell">
-            <table><tbody><tr v-for="price in prices" :key="price.model_pattern"><td>{{ price.model_pattern }}</td><td>{{ price.input_price_per_1k }}</td><td>{{ price.output_price_per_1k }}</td><td>{{ price.cache_price_per_1k }}</td></tr></tbody></table>
+            <table><tbody><tr v-for="price in prices" :key="`${price.channel_id || 'global'}:${price.model_pattern}`"><td>{{ priceScope(price) }}</td><td>{{ price.model_pattern }}</td><td>{{ price.input_price_per_1k }}</td><td>{{ price.output_price_per_1k }}</td><td>{{ price.cache_price_per_1k }}</td></tr></tbody></table>
           </div>
         </section>
 

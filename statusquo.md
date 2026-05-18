@@ -23,3 +23,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Rebuilt the frontend and checked login/dashboard desktop and mobile rendering with Playwright against a temporary local backend.
+
+## [2026-05-18 14:53] Owner Channel Pricing
+- **Changes:** Opened channel creation to regular users, redacted upstream API secrets from console channel responses, owner-scoped regular-user channel reads, added channel-specific model price overrides with global fallback, and updated the Vue pricing scope controls.
+- **Status:** Completed
+- **Next Steps:** Run a production smoke test with one regular-user channel and one admin global default price.
+- **Context:** Gateway routing still uses full internal channel records, while console APIs return masked channel DTOs; channel prices override global model patterns only for the selected upstream channel.

@@ -1,4 +1,11 @@
-use tokenaltar::{app::AppState, config::Config, db::ChannelInput};
+use axum::{body::Body, http::StatusCode};
+use serde_json::{Value, json};
+use tokenaltar::{
+    app::{AppState, build_router},
+    config::Config,
+    db::ChannelInput,
+};
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn transfer_moves_points_losslessly() {
@@ -85,6 +92,106 @@ async fn anonymous_leaderboard_masks_user_identity() {
     assert!(leaderboards["providers"][0]["user_id"].is_null());
 }
 
+#[tokio::test]
+async fn users_create_channels_and_list_only_their_masked_channels() {
+    let state = setup_state().await;
+    let alice = state
+        .db
+        .create_user("alice-channel@example.com", "password123", "Alice")
+        .await
+        .unwrap();
+    let bob = state
+        .db
+        .create_user("bob-channel@example.com", "password123", "Bob")
+        .await
+        .unwrap();
+    state
+        .db
+        .create_session(bob.id)
+        .await
+        .unwrap();
+    let alice_token = state.db.create_session(alice.id).await.unwrap();
+    let bob_channel = state
+        .db
+        .upsert_channel(
+            bob.id,
+            ChannelInput {
+                name: "bob-private".to_string(),
+                provider: "openai".to_string(),
+                base_url: "http://127.0.0.1:9".to_string(),
+                api_key_secret: "bob-secret".to_string(),
+                models: vec!["gpt-bob".to_string()],
+                enabled: true,
+                cycle_limit_tokens: 1000,
+                cycle_reset_day: 1,
+                daily_limit_tokens: 1000,
+                hourly_limit_tokens: 1000,
+                fire_sale_days_before: 3,
+                fire_sale_remaining_pct: 0.25,
+                fire_sale_discount: 0.2,
+                provider_share: 0.7,
+            },
+        )
+        .await
+        .unwrap();
+    let app = build_router(state, &test_config("unused"));
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/channels")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::from(
+                    json!({
+                        "name": "alice-pool",
+                        "provider": "openai",
+                        "base_url": "http://127.0.0.1:9",
+                        "api_key_secret": "alice-secret",
+                        "models": ["gpt-alice"],
+                        "enabled": true,
+                        "cycle_limit_tokens": 1000,
+                        "cycle_reset_day": 1,
+                        "daily_limit_tokens": 1000,
+                        "hourly_limit_tokens": 1000,
+                        "fire_sale_days_before": 3,
+                        "fire_sale_remaining_pct": 0.25,
+                        "fire_sale_discount": 0.2,
+                        "provider_share": 0.7
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/channels")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let channels: Value = serde_json::from_slice(&body).unwrap();
+    let channels = channels.as_array().unwrap();
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0]["name"], "alice-pool");
+    assert_ne!(channels[0]["id"], bob_channel.id);
+    assert!(channels[0].get("api_key_secret").is_none());
+}
+
 async fn setup_state() -> AppState {
     let config = Config {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -131,4 +238,14 @@ async fn setup_state() -> AppState {
         .await
         .unwrap();
     state
+}
+
+fn test_config(database_url: &str) -> Config {
+    Config {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        database_url: database_url.to_string(),
+        admin_email: None,
+        admin_password: None,
+        frontend_dist: "frontend/dist".into(),
+    }
 }

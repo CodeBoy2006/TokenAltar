@@ -65,6 +65,35 @@ pub struct Channel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicChannel {
+    pub id: i64,
+    pub owner_user_id: i64,
+    pub name: String,
+    pub provider: ProviderKind,
+    pub base_url: String,
+    pub models: Vec<String>,
+    pub enabled: bool,
+    pub status: String,
+    pub limits: ChannelLimits,
+}
+
+impl From<Channel> for PublicChannel {
+    fn from(channel: Channel) -> Self {
+        Self {
+            id: channel.id,
+            owner_user_id: channel.owner_user_id,
+            name: channel.name,
+            provider: channel.provider,
+            base_url: channel.base_url,
+            models: channel.models,
+            enabled: channel.enabled,
+            status: channel.status,
+            limits: channel.limits,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelLimits {
     pub cycle_limit_tokens: i64,
     pub cycle_reset_day: i64,
@@ -81,6 +110,7 @@ pub struct ChannelLimits {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPrice {
+    pub channel_id: Option<i64>,
     pub model_pattern: String,
     pub input_price_per_1k: f64,
     pub output_price_per_1k: f64,

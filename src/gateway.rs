@@ -96,10 +96,10 @@ async fn handle_gateway(
 ) -> AppResult<Response> {
     let api_key = auth.api_key.clone().ok_or(AppError::Unauthorized)?;
     state.db.refresh_channel_windows().await?;
-    let prices = state.db.list_prices().await?;
-    let price = select_price(&request.model, &prices);
+    let global_prices = state.db.global_price_book().await?;
+    let reserve_price = select_price(&request.model, &global_prices);
     let token_estimate = crate::tokenizer::estimate_request_tokens(&request);
-    let reserve = token_estimate.tokens as f64 * price.input_price_per_1k / 1000.0;
+    let reserve = token_estimate.tokens as f64 * reserve_price.input_price_per_1k / 1000.0;
     if auth.user.points_balance < reserve {
         return Err(AppError::BadRequest("insufficient points for estimated input tokens".to_string()));
     }
@@ -109,7 +109,7 @@ async fn handle_gateway(
         return Err(AppError::BadRequest("api key spend limit would be exceeded".to_string()));
     }
 
-    let channels = state.db.list_channels().await?;
+    let channels = state.db.list_route_channels().await?;
     let gateway_context = GatewayContext::default();
     let affinity_hit = lookup_affinity(
         &state.db,
@@ -128,6 +128,19 @@ async fn handle_gateway(
         &state.router_state,
     )
     .await?;
+    let price = select_price(
+        &request.model,
+        &state.db.price_book_for_channel(decision.channel.id).await?,
+    );
+    let selected_reserve = token_estimate.tokens as f64 * price.input_price_per_1k / 1000.0;
+    if auth.user.points_balance < selected_reserve {
+        return Err(AppError::BadRequest("insufficient points for estimated input tokens".to_string()));
+    }
+    if let Some(limit) = api_key.spend_limit_points
+        && api_key.spent_points + selected_reserve > limit
+    {
+        return Err(AppError::BadRequest("api key spend limit would be exceeded".to_string()));
+    }
 
     let request_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
     let stream = request.stream;
@@ -139,6 +152,10 @@ async fn handle_gateway(
             .mark_cooldown(decision.channel.id, Duration::from_secs(30))
             .await;
         let retry = choose_channel(&channels, &request.model, decision.affinity_hit.clone(), &state.router_state).await?;
+        let retry_price = select_price(
+            &request.model,
+            &state.db.price_book_for_channel(retry.channel.id).await?,
+        );
         let retry_response = send_upstream(&state, &retry, &request, stream).await?;
         let finish = FinishContext {
             state,
@@ -148,7 +165,7 @@ async fn handle_gateway(
             request,
             client_protocol,
             request_id,
-            price,
+            price: retry_price,
         };
         return finish_response(finish, retry_response)
         .await;
@@ -381,7 +398,7 @@ async fn enqueue_ledger(
 }
 
 pub async fn surge_multiplier(state: &AppState) -> (f64, &'static str) {
-    let channels = state.db.list_channels().await.unwrap_or_default();
+    let channels = state.db.list_route_channels().await.unwrap_or_default();
     let total_available: i64 = channels
         .iter()
         .map(|channel| channel.limits.cycle_limit_tokens - channel.limits.used_cycle_tokens)

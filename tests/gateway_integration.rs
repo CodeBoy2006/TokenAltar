@@ -6,6 +6,7 @@ use tokenaltar::{
     app::{AppState, build_router},
     config::Config,
     db::ChannelInput,
+    models::ModelPrice,
 };
 use tower::ServiceExt;
 
@@ -166,6 +167,67 @@ async fn exhausted_channel_is_marked_unavailable() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn channel_price_override_is_used_for_settlement() {
+    let upstream = spawn_upstream(json!({
+        "id": "resp_test",
+        "model": "gpt-special",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+        "usage": {"input_tokens": 1000, "output_tokens": 1000}
+    }))
+    .await;
+    let (state, token) = setup_state(upstream).await;
+    state
+        .db
+        .upsert_price(&ModelPrice {
+            channel_id: None,
+            model_pattern: "gpt-special".to_string(),
+            input_price_per_1k: 1.0,
+            output_price_per_1k: 1.0,
+            cache_price_per_1k: 0.0,
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .upsert_price(&ModelPrice {
+            channel_id: Some(1),
+            model_pattern: "gpt-special".to_string(),
+            input_price_per_1k: 10.0,
+            output_price_per_1k: 20.0,
+            cache_price_per_1k: 0.0,
+        })
+        .await
+        .unwrap();
+    let app = build_router(state.clone(), &test_config("unused"));
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({"model": "gpt-special", "input": "hello"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let row: (f64, f64) = sqlx::query_as(
+        "SELECT input_price_per_1k, output_price_per_1k FROM ledger_entries WHERE model = 'gpt-special'",
+    )
+    .fetch_one(&state.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, 10.0);
+    assert_eq!(row.1, 20.0);
 }
 
 async fn setup_state(upstream: String) -> (AppState, String) {

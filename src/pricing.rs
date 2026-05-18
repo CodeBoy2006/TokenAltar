@@ -13,27 +13,37 @@ pub struct Settlement {
 }
 
 pub fn select_price(model: &str, prices: &[ModelPrice]) -> ModelPrice {
-    for price in prices {
-        if price.model_pattern == "default" {
-            continue;
-        }
-        if Regex::new(&price.model_pattern)
-            .map(|regex| regex.is_match(model))
-            .unwrap_or(false)
-        {
-            return price.clone();
-        }
-    }
-    prices
-        .iter()
-        .find(|price| price.model_pattern == "default")
-        .cloned()
+    scoped_match(model, prices, true)
+        .or_else(|| scoped_default(prices, true))
+        .or_else(|| scoped_match(model, prices, false))
+        .or_else(|| scoped_default(prices, false))
         .unwrap_or(ModelPrice {
+            channel_id: None,
             model_pattern: "default".to_string(),
             input_price_per_1k: 1.0,
             output_price_per_1k: 3.0,
             cache_price_per_1k: 0.2,
         })
+}
+
+fn scoped_match(model: &str, prices: &[ModelPrice], channel_scoped: bool) -> Option<ModelPrice> {
+    prices
+        .iter()
+        .filter(|price| price.channel_id.is_some() == channel_scoped)
+        .filter(|price| price.model_pattern != "default")
+        .find(|price| {
+            Regex::new(&price.model_pattern)
+                .map(|regex| regex.is_match(model))
+                .unwrap_or(false)
+        })
+        .cloned()
+}
+
+fn scoped_default(prices: &[ModelPrice], channel_scoped: bool) -> Option<ModelPrice> {
+    prices
+        .iter()
+        .find(|price| price.channel_id.is_some() == channel_scoped && price.model_pattern == "default")
+        .cloned()
 }
 
 pub fn settle(
@@ -106,6 +116,7 @@ mod tests {
                 cache_tokens: 500,
             },
             &ModelPrice {
+                channel_id: None,
                 model_pattern: "default".to_string(),
                 input_price_per_1k: 1.0,
                 output_price_per_1k: 3.0,
@@ -117,5 +128,30 @@ mod tests {
         );
         assert_eq!(settlement.total_points, 0.41);
         assert_eq!(settlement.provider_points, 0.287);
+    }
+
+    #[test]
+    fn channel_price_scope_precedes_global_scope() {
+        let price = select_price(
+            "gpt-special",
+            &[
+                ModelPrice {
+                    channel_id: Some(7),
+                    model_pattern: "default".to_string(),
+                    input_price_per_1k: 9.0,
+                    output_price_per_1k: 9.0,
+                    cache_price_per_1k: 0.0,
+                },
+                ModelPrice {
+                    channel_id: None,
+                    model_pattern: "gpt-special".to_string(),
+                    input_price_per_1k: 1.0,
+                    output_price_per_1k: 1.0,
+                    cache_price_per_1k: 0.0,
+                },
+            ],
+        );
+        assert_eq!(price.channel_id, Some(7));
+        assert_eq!(price.input_price_per_1k, 9.0);
     }
 }
