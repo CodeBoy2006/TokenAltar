@@ -187,7 +187,10 @@ fn parse_openai_chat_completions(value: &Value) -> AppResult<TextRequest> {
             .to_string();
         let content = openai_content_to_parts(message.get("content"))?;
         if role == "system" {
-            system_parts.push(parts_to_text_only(&content, "chat completions system message")?);
+            system_parts.push(parts_to_text_only(
+                &content,
+                "chat completions system message",
+            )?);
             continue;
         }
         messages.push(TextMessage {
@@ -905,11 +908,11 @@ fn openai_content_item_to_part(item: &Value) -> Option<AppResult<MessagePart>> {
             .and_then(Value::as_str)
             .map(|text| Ok(MessagePart::Text(text.to_string()))),
         "tool_use" => None,
-        "input_audio" | "input_file" | "audio" | "video" | "document" => Some(Err(
-            AppError::BadRequest(format!(
+        "input_audio" | "input_file" | "audio" | "video" | "document" => {
+            Some(Err(AppError::BadRequest(format!(
                 "unsupported non-text OpenAI content item type: {item_type}"
-            )),
-        )),
+            ))))
+        }
         other => Some(Err(AppError::BadRequest(format!(
             "unsupported non-text OpenAI content item type: {other}"
         )))),
@@ -1051,11 +1054,11 @@ fn anthropic_content_item_to_part(item: &Value) -> Option<AppResult<MessagePart>
             .and_then(Value::as_str)
             .map(|text| Ok(MessagePart::Text(text.to_string()))),
         "tool_use" => None,
-        "input_audio" | "input_file" | "audio" | "video" | "document" => Some(Err(
-            AppError::BadRequest(format!(
+        "input_audio" | "input_file" | "audio" | "video" | "document" => {
+            Some(Err(AppError::BadRequest(format!(
                 "unsupported non-text Anthropic content item type: {item_type}"
-            )),
-        )),
+            ))))
+        }
         other => Some(Err(AppError::BadRequest(format!(
             "unsupported non-text Anthropic content item type: {other}"
         )))),
@@ -1083,10 +1086,7 @@ fn gemini_parts_to_message_parts(parts: Option<&Value>) -> AppResult<Vec<Message
             content.push(MessagePart::Text(text.to_string()));
             continue;
         }
-        if let Some(inline_data) = part
-            .get("inlineData")
-            .or_else(|| part.get("inline_data"))
-        {
+        if let Some(inline_data) = part.get("inlineData").or_else(|| part.get("inline_data")) {
             content.push(MessagePart::Image(parse_gemini_inline_data(inline_data)?));
             continue;
         }
@@ -1222,10 +1222,7 @@ fn gemini_content_parts(parts: &[MessagePart]) -> AppResult<Vec<Value>> {
 
 fn image_input_to_openai_responses_item(image: &ImageInput) -> AppResult<Value> {
     let mut item = Map::new();
-    item.insert(
-        "type".to_string(),
-        Value::String("input_image".to_string()),
-    );
+    item.insert("type".to_string(), Value::String("input_image".to_string()));
     if let Some(detail) = &image.detail {
         item.insert("detail".to_string(), Value::String(detail.clone()));
     }
@@ -1535,8 +1532,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(request.messages[0].content.len(), 3);
-        assert!(matches!(request.messages[0].content[1], MessagePart::Image(_)));
-        assert!(matches!(request.messages[0].content[2], MessagePart::Image(_)));
+        assert!(matches!(
+            request.messages[0].content[1],
+            MessagePart::Image(_)
+        ));
+        assert!(matches!(
+            request.messages[0].content[2],
+            MessagePart::Image(_)
+        ));
     }
 
     #[test]
@@ -1560,7 +1563,10 @@ mod tests {
             &request,
         )
         .unwrap();
-        assert_eq!(body["input"][0]["content"][1]["image_url"], "https://example.com/a.png");
+        assert_eq!(
+            body["input"][0]["content"][1]["image_url"],
+            "https://example.com/a.png"
+        );
         assert!(body.get("_stream").is_none());
     }
 

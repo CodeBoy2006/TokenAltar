@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -62,6 +62,11 @@ pub struct RedPacketRequest {
 #[derive(Debug, Deserialize)]
 pub struct ClaimRedPacketRequest {
     pub phrase: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LeaderboardQuery {
+    pub period: Option<String>,
 }
 
 pub async fn register(
@@ -329,7 +334,15 @@ pub async fn list_red_packets(
 
 pub async fn leaderboards(
     State(state): State<crate::app::AppState>,
+    Query(query): Query<LeaderboardQuery>,
     ConsoleAuth(_auth): ConsoleAuth,
 ) -> AppResult<Json<serde_json::Value>> {
-    Ok(Json(state.db.leaderboards().await?))
+    let period =
+        crate::db::LeaderboardPeriod::try_from(query.period.as_deref().unwrap_or("month"))?;
+    Ok(Json(
+        state
+            .db
+            .leaderboards(period, state.leaderboard_timezone.as_deref())
+            .await?,
+    ))
 }

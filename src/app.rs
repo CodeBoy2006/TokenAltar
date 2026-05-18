@@ -30,6 +30,7 @@ pub struct AppState {
     pub router_state: RuntimeRouterState,
     pub metrics: MetricsState,
     pub ledger_tx: LedgerSender,
+    pub leaderboard_timezone: Option<String>,
 }
 
 impl AppState {
@@ -52,6 +53,7 @@ impl AppState {
             router_state: RuntimeRouterState::default(),
             metrics,
             ledger_tx,
+            leaderboard_timezone: config.leaderboard_timezone.clone(),
         })
     }
 }

@@ -503,6 +503,7 @@ fn test_config(database_url: &str) -> Config {
         admin_email: None,
         admin_password: None,
         frontend_dist: "frontend/dist".into(),
+        leaderboard_timezone: None,
     }
 }
 
@@ -646,8 +647,14 @@ async fn spawn_gemini_image_upstream() -> String {
 
 async fn spawn_gemini_image_passthrough_upstream() -> String {
     async fn generate(Json(body): Json<Value>) -> Json<Value> {
-        assert_eq!(body["contents"][0]["parts"][0]["fileData"]["fileUri"], "https://local.test/direct-gemini.png");
-        assert_eq!(body["contents"][0]["parts"][0]["fileData"]["mimeType"], "image/png");
+        assert_eq!(
+            body["contents"][0]["parts"][0]["fileData"]["fileUri"],
+            "https://local.test/direct-gemini.png"
+        );
+        assert_eq!(
+            body["contents"][0]["parts"][0]["fileData"]["mimeType"],
+            "image/png"
+        );
         Json(json!({
             "candidates": [{
                 "content": {
@@ -681,7 +688,10 @@ async fn spawn_image_source_upstream() -> String {
         );
         response
     }
-    let app = Router::new().route("/tokenaltar-gemini.png", axum::routing::get(|| async { image().await }));
+    let app = Router::new().route(
+        "/tokenaltar-gemini.png",
+        axum::routing::get(|| async { image().await }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     tokio::spawn(async move {

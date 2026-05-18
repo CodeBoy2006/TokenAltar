@@ -7,6 +7,7 @@ pub struct Config {
     pub admin_email: Option<String>,
     pub admin_password: Option<String>,
     pub frontend_dist: PathBuf,
+    pub leaderboard_timezone: Option<String>,
 }
 
 impl Config {
@@ -26,6 +27,7 @@ impl Config {
             admin_email: env::var("TOKENALTAR_ADMIN_EMAIL").ok(),
             admin_password: env::var("TOKENALTAR_ADMIN_PASSWORD").ok(),
             frontend_dist,
+            leaderboard_timezone: env::var("TOKENALTAR_LEADERBOARD_TIMEZONE").ok(),
         })
     }
 }

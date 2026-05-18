@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use tokenaltar::{
     app::{AppState, build_router},
     config::Config,
-    db::ChannelInput,
+    db::{ChannelInput, LeaderboardPeriod},
 };
 use tower::ServiceExt;
 
@@ -92,7 +92,11 @@ async fn anonymous_leaderboard_masks_user_identity() {
     .await
     .unwrap();
 
-    let leaderboards = state.db.leaderboards().await.unwrap();
+    let leaderboards = state
+        .db
+        .leaderboards(LeaderboardPeriod::Month, None)
+        .await
+        .unwrap();
     assert!(
         leaderboards["providers"][0]["name"]
             .as_str()
@@ -100,6 +104,45 @@ async fn anonymous_leaderboard_masks_user_identity() {
             .starts_with("Anonymous #")
     );
     assert!(leaderboards["providers"][0]["user_id"].is_null());
+}
+
+#[tokio::test]
+async fn leaderboards_support_day_period_and_skip_failed_ledger_rows() {
+    let state = setup_state().await;
+    let user = state
+        .db
+        .create_user("daily@example.com", "password123", "Daily")
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO ledger_entries(
+          request_id, user_id, api_key_id, channel_id, provider_user_id, model, tokenizer,
+          input_tokens, output_tokens, cache_tokens, input_price_per_1k, output_price_per_1k,
+          cache_price_per_1k, surge_multiplier, fire_sale_discount, total_points,
+          provider_points, status, formula_note, created_at
+        ) VALUES
+          ('req_daily_success', ?, 1, 1, ?, 'gpt-test', 'test', 10, 5, 0, 1, 3, 0, 1, 1, 2, 1, 'success', 'ok', datetime('now')),
+          ('req_daily_error', ?, 1, 1, ?, 'gpt-test', 'test', 100, 50, 0, 1, 3, 0, 1, 1, 20, 1, 'upstream_error', 'skip', datetime('now'))
+        "#,
+    )
+    .bind(user.id)
+    .bind(user.id)
+    .bind(user.id)
+    .bind(user.id)
+    .execute(&state.db.pool)
+    .await
+    .unwrap();
+
+    let leaderboards = state
+        .db
+        .leaderboards(LeaderboardPeriod::Day, Some("Asia/Shanghai"))
+        .await
+        .unwrap();
+    assert_eq!(leaderboards["period"], "day");
+    assert_eq!(leaderboards["timezone"], "Asia/Shanghai");
+    assert_eq!(leaderboards["providers"][0]["score"], 15.0);
+    assert_eq!(leaderboards["consumers"][0]["score"], 2.0);
 }
 
 #[tokio::test]
@@ -205,6 +248,7 @@ async fn setup_state() -> AppState {
         admin_email: None,
         admin_password: None,
         frontend_dist: "frontend/dist".into(),
+        leaderboard_timezone: None,
     };
     let state = AppState::new(&config).await.unwrap();
     state
@@ -257,5 +301,6 @@ fn test_config(database_url: &str) -> Config {
         admin_email: None,
         admin_password: None,
         frontend_dist: "frontend/dist".into(),
+        leaderboard_timezone: None,
     }
 }

@@ -1,6 +1,7 @@
 use std::{str::FromStr, time::Duration};
 
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
+use chrono_tz::Tz;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -32,6 +33,35 @@ pub struct DashboardSummary {
     pub spent_points_today: f64,
     pub surge_multiplier: f64,
     pub surge_state: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderboardPeriod {
+    Day,
+    Month,
+}
+
+impl LeaderboardPeriod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Month => "month",
+        }
+    }
+}
+
+impl TryFrom<&str> for LeaderboardPeriod {
+    type Error = AppError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "day" => Ok(Self::Day),
+            "month" => Ok(Self::Month),
+            other => Err(AppError::BadRequest(format!(
+                "unsupported leaderboard period: {other}"
+            ))),
+        }
+    }
 }
 
 impl Database {
@@ -1039,16 +1069,22 @@ impl Database {
             .collect())
     }
 
-    pub async fn leaderboards(&self) -> AppResult<serde_json::Value> {
+    pub async fn leaderboards(
+        &self,
+        period: LeaderboardPeriod,
+        timezone: Option<&str>,
+    ) -> AppResult<serde_json::Value> {
+        let window_start = leaderboard_window_start(period, timezone)?;
         let providers = sqlx::query(
             r#"
             SELECT u.id, u.display_name, u.anonymous_leaderboard,
                    COALESCE(SUM(l.input_tokens + l.output_tokens + l.cache_tokens), 0) AS score
             FROM ledger_entries l JOIN users u ON u.id = l.provider_user_id
-            WHERE l.created_at >= date('now', 'start of month')
+            WHERE l.created_at >= ? AND l.status = 'success'
             GROUP BY u.id ORDER BY score DESC LIMIT 20
             "#,
         )
+        .bind(&window_start)
         .fetch_all(&self.pool)
         .await?;
         let consumers = sqlx::query(
@@ -1056,13 +1092,17 @@ impl Database {
             SELECT u.id, u.display_name, u.anonymous_leaderboard,
                    COALESCE(SUM(l.total_points), 0) AS score
             FROM ledger_entries l JOIN users u ON u.id = l.user_id
-            WHERE l.created_at >= date('now', 'start of month')
+            WHERE l.created_at >= ? AND l.status = 'success'
             GROUP BY u.id ORDER BY score DESC LIMIT 20
             "#,
         )
+        .bind(&window_start)
         .fetch_all(&self.pool)
         .await?;
         Ok(json!({
+            "period": period.as_str(),
+            "window_start": window_start,
+            "timezone": normalized_leaderboard_timezone(timezone),
             "providers": providers.iter().map(leaderboard_row).collect::<Vec<_>>(),
             "consumers": consumers.iter().map(leaderboard_row).collect::<Vec<_>>(),
         }))
@@ -1190,4 +1230,75 @@ fn leaderboard_row(row: &sqlx::sqlite::SqliteRow) -> serde_json::Value {
 
 pub fn now_rfc3339() -> String {
     DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339()
+}
+
+fn leaderboard_window_start(
+    period: LeaderboardPeriod,
+    timezone: Option<&str>,
+) -> AppResult<String> {
+    let now = Utc::now();
+    if let Some(name) = timezone.and_then(non_empty_timezone) {
+        let tz: Tz = name
+            .parse()
+            .map_err(|_| AppError::BadRequest(format!("invalid leaderboard timezone: {name}")))?;
+        let local = now.with_timezone(&tz);
+        let start_date = match period {
+            LeaderboardPeriod::Day => local.date_naive(),
+            LeaderboardPeriod::Month => local
+                .date_naive()
+                .with_day(1)
+                .ok_or_else(|| AppError::BadRequest("invalid leaderboard month".to_string()))?,
+        };
+        let local_start = tz
+            .from_local_datetime(
+                &start_date
+                    .and_hms_opt(0, 0, 0)
+                    .ok_or_else(|| AppError::BadRequest("invalid leaderboard day".to_string()))?,
+            )
+            .earliest()
+            .ok_or_else(|| {
+                AppError::BadRequest("invalid leaderboard timezone boundary".to_string())
+            })?;
+        Ok(sqlite_utc_datetime(local_start.with_timezone(&Utc)))
+    } else {
+        let local = Local::now();
+        let start = match period {
+            LeaderboardPeriod::Day => local.date_naive(),
+            LeaderboardPeriod::Month => local
+                .date_naive()
+                .with_day(1)
+                .ok_or_else(|| AppError::BadRequest("invalid leaderboard month".to_string()))?,
+        };
+        let local_start = Local
+            .from_local_datetime(
+                &start
+                    .and_hms_opt(0, 0, 0)
+                    .ok_or_else(|| AppError::BadRequest("invalid leaderboard day".to_string()))?,
+            )
+            .earliest()
+            .ok_or_else(|| {
+                AppError::BadRequest("invalid server local timezone boundary".to_string())
+            })?;
+        Ok(sqlite_utc_datetime(local_start.with_timezone(&Utc)))
+    }
+}
+
+fn sqlite_utc_datetime(datetime: DateTime<Utc>) -> String {
+    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn normalized_leaderboard_timezone(timezone: Option<&str>) -> String {
+    timezone
+        .and_then(non_empty_timezone)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "server-local".to_string())
+}
+
+fn non_empty_timezone(timezone: &str) -> Option<&str> {
+    let trimmed = timezone.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }

@@ -32,6 +32,7 @@ The server listens on `127.0.0.1:8080` by default and stores data in `tokenaltar
 - `TOKENALTAR_DATABASE_URL`: SQLite URL, default `sqlite://tokenaltar.sqlite3`.
 - `TOKENALTAR_FRONTEND_DIST`: built Vue directory, default `frontend/dist`.
 - `TOKENALTAR_ADMIN_EMAIL` and `TOKENALTAR_ADMIN_PASSWORD`: create the first admin if missing.
+- `TOKENALTAR_LEADERBOARD_TIMEZONE`: optional IANA timezone for day/month leaderboard windows, for example `Asia/Shanghai`; defaults to the server local timezone.
 
 ## Gateway Notes
 
@@ -49,7 +50,7 @@ Files, embeddings, rerank, realtime, audio, and other non-text extensions are in
 - Model prices are matched per channel first, then fall back to global model defaults managed by admins.
 - Invite-gated registration is controlled by `invite_required` and `invite_code_default` in the Settings tab.
 - Red packet claims are transaction guarded with unique `(packet, user)` claims.
-- Leaderboards mask users that enable anonymous ranking.
+- Leaderboards support `period=day` and `period=month`, count successful ledger entries only, and mask users that enable anonymous ranking.
 
 ## Verify
 

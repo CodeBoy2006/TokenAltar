@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use axum::{
     Json,
     body::Body,
@@ -8,6 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -315,7 +315,10 @@ async fn send_upstream(
         .map_err(|err| AppError::Upstream(err.to_string()))
 }
 
-async fn normalize_gemini_image_parts(client: &reqwest::Client, mut body: Value) -> AppResult<Value> {
+async fn normalize_gemini_image_parts(
+    client: &reqwest::Client,
+    mut body: Value,
+) -> AppResult<Value> {
     if let Some(contents) = body.get_mut("contents").and_then(Value::as_array_mut) {
         for content in contents {
             normalize_gemini_content_parts(client, content).await?;
@@ -327,7 +330,10 @@ async fn normalize_gemini_image_parts(client: &reqwest::Client, mut body: Value)
     Ok(body)
 }
 
-async fn normalize_gemini_content_parts(client: &reqwest::Client, content: &mut Value) -> AppResult<()> {
+async fn normalize_gemini_content_parts(
+    client: &reqwest::Client,
+    content: &mut Value,
+) -> AppResult<()> {
     let Some(parts) = content.get_mut("parts").and_then(Value::as_array_mut) else {
         return Ok(());
     };
@@ -361,8 +367,13 @@ async fn normalize_gemini_part(client: &reqwest::Client, part: &mut Value) -> Ap
         .map_err(|err| AppError::Upstream(err.to_string()))?
         .error_for_status()
         .map_err(|err| AppError::Upstream(err.to_string()))?;
-    let mime_type = resolve_image_mime_type(response.headers().get(reqwest::header::CONTENT_TYPE), provided_mime)
-        .ok_or_else(|| AppError::BadRequest("unable to determine image mime type for Gemini".to_string()))?;
+    let mime_type = resolve_image_mime_type(
+        response.headers().get(reqwest::header::CONTENT_TYPE),
+        provided_mime,
+    )
+    .ok_or_else(|| {
+        AppError::BadRequest("unable to determine image mime type for Gemini".to_string())
+    })?;
     let bytes = response
         .bytes()
         .await

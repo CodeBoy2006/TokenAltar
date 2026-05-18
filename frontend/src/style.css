@@ -576,6 +576,15 @@ caption {
   color: #fff2d5;
 }
 
+.segmented.small {
+  min-width: 168px;
+}
+
+.segmented.small button {
+  min-height: 36px;
+  padding: 0 12px;
+}
+
 .page-header {
   position: relative;
   display: grid;
@@ -736,6 +745,16 @@ caption {
 .toolbar p {
   margin-top: 3px;
   color: var(--ink-muted);
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.leaderboard-window {
+  margin: -4px 0 14px;
 }
 
 .metric-grid {
@@ -1016,6 +1035,15 @@ td:first-child {
   }
 
   .toolbar button {
+    width: 100%;
+  }
+
+  .toolbar-actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .segmented.small {
     width: 100%;
   }
 }

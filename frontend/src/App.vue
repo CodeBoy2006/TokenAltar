@@ -46,6 +46,7 @@ const ledger = ref<any[]>([])
 const transfers = ref<any[]>([])
 const redPackets = ref<any[]>([])
 const leaderboards = ref<any>({ providers: [], consumers: [] })
+const leaderboardPeriod = ref<'day' | 'month'>('month')
 const settings = ref<any[]>([])
 const dashboard = ref<Dashboard | null>(null)
 const newApiKey = ref('')
@@ -247,7 +248,7 @@ async function loadRules() { rules.value = await api('/affinity-rules') }
 async function loadLedger() { ledger.value = await api('/ledger') }
 async function loadTransfers() { transfers.value = await api('/transfers') }
 async function loadRedPackets() { redPackets.value = await api('/red-packets') }
-async function loadLeaderboards() { leaderboards.value = await api('/leaderboards') }
+async function loadLeaderboards() { leaderboards.value = await api(`/leaderboards?period=${leaderboardPeriod.value}`) }
 
 async function loadSettings() {
   settings.value = await api('/settings')
@@ -331,6 +332,11 @@ async function toggleAnonymous() {
     body: JSON.stringify({ enabled: !user.value?.anonymous_leaderboard }),
   })
   user.value = updated
+  await loadLeaderboards()
+}
+
+async function setLeaderboardPeriod(period: 'day' | 'month') {
+  leaderboardPeriod.value = period
   await loadLeaderboards()
 }
 
@@ -567,7 +573,17 @@ onMounted(refreshAll)
         </section>
 
         <section v-if="activeTab === 'leaderboards'">
-          <div class="toolbar"><div><h3>Monthly honors</h3><p>Provider tokens and consumer point burn.</p></div><button class="ghost" @click="loadLeaderboards">Refresh</button></div>
+          <div class="toolbar">
+            <div><h3>{{ leaderboardPeriod === 'day' ? 'Daily honors' : 'Monthly honors' }}</h3><p>Provider tokens and consumer point burn.</p></div>
+            <div class="toolbar-actions">
+              <div class="segmented small">
+                <button :class="{ active: leaderboardPeriod === 'day' }" @click="setLeaderboardPeriod('day')">Day</button>
+                <button :class="{ active: leaderboardPeriod === 'month' }" @click="setLeaderboardPeriod('month')">Month</button>
+              </div>
+              <button class="ghost" @click="loadLeaderboards">Refresh</button>
+            </div>
+          </div>
+          <p class="muted leaderboard-window">Window starts {{ leaderboards.window_start || '-' }} / {{ leaderboards.timezone || 'server-local' }}</p>
           <div class="table-pair">
             <div class="table-shell"><table><caption>Providers</caption><tbody><tr v-for="row in leaderboards.providers" :key="row.name"><td>{{ row.name }}</td><td>{{ fmt(row.score, 0) }} tokens</td></tr></tbody></table></div>
             <div class="table-shell"><table><caption>Consumers</caption><tbody><tr v-for="row in leaderboards.consumers" :key="row.name"><td>{{ row.name }}</td><td>{{ fmt(row.score, 4) }} points</td></tr></tbody></table></div>

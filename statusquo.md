@@ -48,6 +48,12 @@
 - **Next Steps:** None.
 - **Context:** Verified `pnpm --dir frontend build`; checked 1366x900 and 2048x1373 hero/title/card geometry for no overlap and zero horizontal page overflow.
 
+## [2026-05-18 17:57] Daily Leaderboards
+- **Changes:** Added day/month leaderboard periods, success-only leaderboard aggregation, configurable leaderboard window timezone via `TOKENALTAR_LEADERBOARD_TIMEZONE`, Vue day/month controls, README documentation, and regression coverage for daily filtering.
+- **Status:** Completed
+- **Next Steps:** Set `TOKENALTAR_LEADERBOARD_TIMEZONE` in production if the deployment should use a fixed IANA timezone such as `Asia/Shanghai`.
+- **Context:** Defaults to the server local timezone when the environment variable is unset; leaderboard window starts are converted to SQLite UTC datetime strings before querying ledger rows.
+
 ## [2026-05-18 16:24] Image Input Protocol Support
 - **Changes:** Extended the shared protocol layer to parse and serialize image parts for OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini Generate Content; added conservative image token prechecks; added Gemini image normalization in the gateway so external URLs are fetched and converted to `inlineData` before forwarding; updated tests and README gateway notes.
 - **Status:** Completed
