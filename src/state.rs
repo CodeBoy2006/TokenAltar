@@ -112,6 +112,9 @@ mod tests {
         metrics.add_tokens_at(10, now);
         metrics.add_tokens_at(15, now + Duration::from_secs(30));
 
-        assert_eq!(metrics.tokens_last_hour_at(now + Duration::from_secs(30)), 25);
+        assert_eq!(
+            metrics.tokens_last_hour_at(now + Duration::from_secs(30)),
+            25
+        );
     }
 }

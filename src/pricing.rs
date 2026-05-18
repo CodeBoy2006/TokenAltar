@@ -106,9 +106,10 @@ fn is_fire_sale_at(channel: &Channel, now: DateTime<Utc>) -> bool {
         && next_cycle_reset_at(channel.limits.cycle_reset_day, now)
             .and_then(|reset_at| reset_at.signed_duration_since(now).to_std().ok())
             .is_some_and(|until_reset| {
-                until_reset < std::time::Duration::from_secs(
-                    channel.limits.fire_sale_days_before as u64 * 24 * 60 * 60,
-                )
+                until_reset
+                    < std::time::Duration::from_secs(
+                        channel.limits.fire_sale_days_before as u64 * 24 * 60 * 60,
+                    )
             })
 }
 

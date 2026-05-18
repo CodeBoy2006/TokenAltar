@@ -91,7 +91,11 @@ pub async fn lookup_affinity(
         } else if let Some((channel_id, expires_at)) = db.get_affinity_binding(&cache_key).await? {
             if let Ok(expires_at) = DateTime::parse_from_rfc3339(&expires_at) {
                 cache
-                    .put(cache_key.clone(), channel_id, expires_at.with_timezone(&Utc))
+                    .put(
+                        cache_key.clone(),
+                        channel_id,
+                        expires_at.with_timezone(&Utc),
+                    )
                     .await;
             }
             Some(channel_id)
@@ -123,7 +127,11 @@ pub async fn remember_affinity(
         .await?;
     if let Ok(expires_at) = DateTime::parse_from_rfc3339(&expires_at) {
         cache
-            .put(hit.cache_key.clone(), channel_id, expires_at.with_timezone(&Utc))
+            .put(
+                hit.cache_key.clone(),
+                channel_id,
+                expires_at.with_timezone(&Utc),
+            )
             .await;
     }
     Ok(())
