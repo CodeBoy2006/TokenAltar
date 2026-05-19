@@ -277,6 +277,207 @@ async fn users_create_channels_and_list_only_their_masked_channels() {
 }
 
 #[tokio::test]
+async fn admin_manages_users_and_disabled_accounts_cannot_authenticate() {
+    let state = setup_state().await;
+    let admin = state
+        .db
+        .find_user_with_hash("admin@example.com")
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let admin_token = state.db.create_session(admin.id).await.unwrap();
+    let app = build_router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/users")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {admin_token}"))
+                .body(Body::from(
+                    json!({
+                        "email": "managed@example.com",
+                        "password": "password123",
+                        "role": "user",
+                        "display_name": "Managed",
+                        "points_balance": 123.5,
+                        "enabled": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: Value = serde_json::from_slice(&body).unwrap();
+    let managed_id = created["id"].as_i64().unwrap();
+    assert_eq!(created["points_balance"], 123.5);
+
+    let managed_session = state.db.create_session(managed_id).await.unwrap();
+    let (gateway_key, managed_key_record) = state
+        .db
+        .create_api_key(managed_id, "managed-key", Some(10.0))
+        .await
+        .unwrap();
+    let channel = state
+        .db
+        .upsert_channel(
+            managed_id,
+            ChannelInput {
+                name: "managed-channel".to_string(),
+                provider: "openai".to_string(),
+                base_url: "http://127.0.0.1:9".to_string(),
+                api_key_secret: "managed-secret".to_string(),
+                models: vec!["*".to_string()],
+                enabled: true,
+                windows: quota_windows(1000),
+                fire_sale_days_before: 3,
+                fire_sale_remaining_pct: 0.25,
+                fire_sale_discount: 0.2,
+                provider_share: 0.7,
+            },
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/users/{managed_id}"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {admin_token}"))
+                .body(Body::from(
+                    json!({
+                        "email": "managed-renamed@example.com",
+                        "role": "user",
+                        "display_name": "Managed Renamed",
+                        "points_balance": 77.25,
+                        "enabled": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        state.db.get_user(managed_id).await.unwrap().display_name,
+        "Managed Renamed"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/users/{managed_id}/password"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {admin_token}"))
+                .body(Body::from(json!({ "password": "newpass123" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/me")
+                .header("authorization", format!("Bearer {managed_session}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let login_response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": "managed-renamed@example.com",
+                        "password": "newpass123"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login_response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/users/{managed_id}/enabled"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {admin_token}"))
+                .body(Body::from(json!({ "enabled": false }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!state.db.get_user(managed_id).await.unwrap().enabled);
+    assert!(
+        !state
+            .db
+            .get_api_key(managed_key_record.id)
+            .await
+            .unwrap()
+            .enabled
+    );
+    assert!(!state.db.get_channel(channel.id).await.unwrap().enabled);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": "managed-renamed@example.com",
+                        "password": "newpass123"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        state
+            .db
+            .find_api_key(&token_hash(&gateway_key))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn gateway_reservation_can_be_released_without_leaking_usage() {
     let state = setup_state().await;
     let alice = state

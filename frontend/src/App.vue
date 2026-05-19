@@ -8,6 +8,7 @@ type User = {
   display_name: string
   points_balance: number
   anonymous_leaderboard: boolean
+  enabled: boolean
 }
 
 type Dashboard = {
@@ -22,6 +23,7 @@ type Dashboard = {
 
 type TabId =
   | 'dashboard'
+  | 'users'
   | 'keys'
   | 'channels'
   | 'prices'
@@ -32,7 +34,17 @@ type TabId =
   | 'settings'
 
 type TabItem = [TabId, string]
-const adminOnlyTabs = new Set<TabId>(['affinity', 'settings'])
+const adminOnlyTabs = new Set<TabId>(['users', 'affinity', 'settings'])
+
+type ManagedUser = User & {
+  disabled_at: string | null
+  created_at: string
+  updated_at: string
+  api_key_count: number
+  channel_count: number
+  total_spent_points: number
+  total_provider_points: number
+}
 
 type LeaderboardRow = {
   user_id: number | null
@@ -86,6 +98,7 @@ const error = ref('')
 const activeTab = ref<TabId>('dashboard')
 const authMode = ref<'login' | 'register'>('login')
 const apiKeys = ref<any[]>([])
+const users = ref<ManagedUser[]>([])
 const channels = ref<any[]>([])
 const prices = ref<any[]>([])
 const rules = ref<any[]>([])
@@ -101,14 +114,24 @@ const newApiKey = ref('')
 const claimResult = ref('')
 const selectedApiKeyIds = ref<number[]>([])
 const selectedChannelIds = ref<number[]>([])
+const editingUserId = ref<number | null>(null)
 const editingApiKeyId = ref<number | null>(null)
 const editingChannelId = ref<number | null>(null)
 const channelTestResults = ref<Record<number, string>>({})
 const apiKeyFilter = ref('')
 const channelFilter = ref('')
+const userFilter = ref('')
 
 const loginForm = reactive({ email: '', password: '' })
 const registerForm = reactive({ email: '', password: '', display_name: '', invite_code: '' })
+const userForm = reactive({
+  email: '',
+  password: '',
+  role: 'user',
+  display_name: '',
+  points_balance: 0,
+  enabled: true,
+})
 const apiKeyForm = reactive({
   name: 'local-dev',
   spend_limit_points: null as number | null,
@@ -195,6 +218,11 @@ const tabDetails: Record<TabId, { eyebrow: string; title: string; description: s
     title: 'Gateway dashboard',
     description: 'Live token supply, surge pressure, and the service routes exposed to clients.',
   },
+  users: {
+    eyebrow: 'Steward Registry',
+    title: 'User management',
+    description: 'Create accounts, adjust roles and balances, reset credentials, and suspend access.',
+  },
   keys: {
     eyebrow: 'Credential Gallery',
     title: 'API key registry',
@@ -247,6 +275,7 @@ const tabs = computed<TabItem[]>(() => {
     ['ledger', 'Ledger'],
   ]
   if (isAdmin.value) {
+    items.splice(1, 0, ['users', 'Users'])
     items.splice(4, 0, ['affinity', 'Affinity'])
     items.push(['settings', 'Settings'])
   }
@@ -271,7 +300,22 @@ const activeTabMeta = computed(() => {
   return meta
 })
 const editingApiKey = computed(() => apiKeys.value.find((item) => item.id === editingApiKeyId.value))
+const editingUser = computed(() => users.value.find((item) => item.id === editingUserId.value))
 const editingChannel = computed(() => channels.value.find((item) => item.id === editingChannelId.value))
+const filteredUsers = computed(() => {
+  const needle = userFilter.value.trim().toLowerCase()
+  if (!needle) return users.value
+  return users.value.filter((record) => {
+    const haystack = [
+      record.id,
+      record.email,
+      record.display_name,
+      record.role,
+      record.enabled ? 'enabled' : 'disabled',
+    ].join(' ').toLowerCase()
+    return haystack.includes(needle)
+  })
+})
 const filteredApiKeys = computed(() => {
   const needle = apiKeyFilter.value.trim().toLowerCase()
   if (!needle) return apiKeys.value
@@ -394,12 +438,14 @@ async function refreshAll() {
     user.value = await api('/me')
     ensureAllowedTab()
     if (!isAdmin.value) {
+      users.value = []
       rules.value = []
       settings.value = []
     }
     await loadRuntimeSettings()
     await Promise.all([
       loadDashboard(),
+      isAdmin.value ? loadUsers() : Promise.resolve(),
       loadApiKeys(),
       loadChannels(),
       loadPrices(),
@@ -417,6 +463,7 @@ async function refreshAll() {
 }
 
 async function loadDashboard() { dashboard.value = await api('/dashboard') }
+async function loadUsers() { users.value = await api('/users') }
 async function loadApiKeys() { apiKeys.value = await api('/api-keys') }
 async function loadChannels() {
   channels.value = await api('/channels')
@@ -446,6 +493,83 @@ async function loadSettings() {
     settingsForm[setting.key] = setting.value
   }
   applyRuntimeDefaults()
+}
+
+async function createManagedUser() {
+  const created = await api('/users', {
+    method: 'POST',
+    body: JSON.stringify({
+      email: userForm.email,
+      password: userForm.password,
+      role: userForm.role,
+      display_name: userForm.display_name || null,
+      points_balance: optionalNumber(userForm.points_balance),
+      enabled: userForm.enabled,
+    }),
+  })
+  editingUserId.value = created.id
+  userForm.password = ''
+  await Promise.all([loadUsers(), loadDashboard()])
+}
+
+async function saveManagedUser() {
+  if (!editingUserId.value) return
+  const updated = await api(`/users/${editingUserId.value}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      email: userForm.email,
+      role: userForm.role,
+      display_name: userForm.display_name,
+      points_balance: Number(userForm.points_balance),
+      enabled: userForm.enabled,
+    }),
+  })
+  if (updated.id === user.value?.id) {
+    await refreshMe()
+    ensureAllowedTab()
+  }
+  await Promise.all([loadUsers(), loadDashboard(), loadChannels()])
+}
+
+async function toggleManagedUser(record: ManagedUser) {
+  const updated = await api(`/users/${record.id}/enabled`, {
+    method: 'POST',
+    body: JSON.stringify({ enabled: !record.enabled }),
+  })
+  if (updated.id === user.value?.id) {
+    await refreshMe()
+    ensureAllowedTab()
+  }
+  await Promise.all([loadUsers(), loadDashboard(), loadChannels()])
+}
+
+async function resetManagedUserPassword() {
+  if (!editingUserId.value || !userForm.password) return
+  await api(`/users/${editingUserId.value}/password`, {
+    method: 'POST',
+    body: JSON.stringify({ password: userForm.password }),
+  })
+  userForm.password = ''
+}
+
+function selectManagedUser(record: ManagedUser) {
+  editingUserId.value = record.id
+  userForm.email = record.email
+  userForm.password = ''
+  userForm.role = record.role
+  userForm.display_name = record.display_name
+  userForm.points_balance = Number(record.points_balance)
+  userForm.enabled = record.enabled
+}
+
+function resetManagedUserForm() {
+  editingUserId.value = null
+  userForm.email = ''
+  userForm.password = ''
+  userForm.role = 'user'
+  userForm.display_name = ''
+  userForm.points_balance = runtimeSettings.value.initial_user_points ?? 0
+  userForm.enabled = true
 }
 
 async function createApiKey() {
@@ -804,6 +928,9 @@ function applyRuntimeDefaults() {
   if (priceForm.cache_price_per_1k === null) {
     priceForm.cache_price_per_1k = runtimeSettings.value.fallback_cache_price_per_unit ?? null
   }
+  if (!editingUserId.value && !userForm.email && userForm.points_balance === 0) {
+    userForm.points_balance = runtimeSettings.value.initial_user_points ?? 0
+  }
 }
 
 async function refreshMe() {
@@ -1018,6 +1145,72 @@ onMounted(refreshAll)
             <code>POST /v1/chat/completions</code>
             <code>POST /v1/responses</code>
             <code>POST /v1/messages</code>
+          </div>
+        </section>
+
+        <section v-if="activeTab === 'users' && isAdmin">
+          <div class="toolbar">
+            <div>
+              <h3>{{ editingUser ? 'Edit account' : 'Create account' }}</h3>
+              <p>Disabled accounts lose console sessions, API key access, and active channel routing.</p>
+            </div>
+            <div class="toolbar-actions">
+              <button class="ghost" @click="resetManagedUserForm">New</button>
+              <button v-if="editingUser" @click="saveManagedUser">Save</button>
+              <button v-else @click="createManagedUser">Create</button>
+            </div>
+          </div>
+          <div class="form-grid compact panel">
+            <label>Email <input v-model="userForm.email" autocomplete="off" /></label>
+            <label>Display Name <input v-model="userForm.display_name" autocomplete="off" /></label>
+            <label>Role <select v-model="userForm.role"><option value="user">User</option><option value="admin">Admin</option></select></label>
+            <label>Points <input v-model.number="userForm.points_balance" type="number" step="0.0001" /></label>
+            <label>Status <select v-model="userForm.enabled"><option :value="true">Enabled</option><option :value="false">Disabled</option></select></label>
+            <label>Password <input v-model="userForm.password" type="password" :placeholder="editingUser ? 'Set a new password' : 'Initial password'" /></label>
+          </div>
+          <div v-if="editingUser" class="single-action">
+            <button class="ghost" :disabled="!userForm.password" @click="resetManagedUserPassword">Reset Password</button>
+          </div>
+          <div class="bulkbar">
+            <div class="bulk-meta">
+              <strong>{{ filteredUsers.length }}</strong>
+              <span>{{ users.length }} total</span>
+            </div>
+            <input v-model="userFilter" class="search-input" placeholder="Filter users, roles, status" />
+            <button class="ghost" @click="loadUsers">Refresh</button>
+          </div>
+          <div class="table-shell">
+            <table class="management-table user-table">
+              <thead>
+                <tr>
+                  <th>User</th><th>Role</th><th>Status</th><th>Balance</th><th>Keys</th><th>Channels</th><th>Spent</th><th>Provided</th><th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="record in filteredUsers" :key="record.id" :class="{ selected: editingUserId === record.id }">
+                  <td>
+                    <button class="link-button" @click="selectManagedUser(record)">{{ record.display_name }}</button>
+                    <div class="muted-cell">#{{ record.id }} / {{ record.email }}</div>
+                  </td>
+                  <td><span class="scope-chip" :class="{ fallback: record.role !== 'admin' }">{{ record.role }}</span></td>
+                  <td><span class="status" :class="statusClass(record)">{{ record.enabled ? 'enabled' : 'disabled' }}</span></td>
+                  <td class="nowrap">{{ fmt(record.points_balance, 4) }}</td>
+                  <td>{{ record.api_key_count }}</td>
+                  <td>{{ record.channel_count }}</td>
+                  <td class="nowrap">{{ fmt(record.total_spent_points, 4) }}</td>
+                  <td class="nowrap">{{ fmt(record.total_provider_points, 4) }}</td>
+                  <td>
+                    <div class="row-actions compact-actions">
+                      <button class="ghost" @click="selectManagedUser(record)">Edit</button>
+                      <button class="ghost danger" :disabled="record.id === user.id && record.enabled" @click="toggleManagedUser(record)">{{ record.enabled ? 'Disable' : 'Enable' }}</button>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="filteredUsers.length === 0">
+                  <td colspan="9" class="empty-row">No users match the current filter.</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </section>
 

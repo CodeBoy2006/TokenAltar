@@ -143,3 +143,9 @@
 - **Status:** Completed
 - **Next Steps:** Restart the service after changing startup-sized settings such as ledger queue capacity or affinity cache capacity.
 - **Context:** Request-time settings apply from `system_settings`; global/channel model price rows still override fallback prices before the configured fallback is used.
+
+## [2026-05-19 17:57] Admin User Management
+- **Changes:** Added user enable/disable schema, admin-only user CRUD/reset APIs, disabled-user authentication enforcement, automatic API key/channel shutdown on account suspension, and a Vue Users tab for account management.
+- **Status:** Completed
+- **Next Steps:** Add audit-log rows for future compliance-grade account operations if needed.
+- **Context:** Disabled accounts preserve ledger/resource history but cannot log in or use existing sessions/API keys; the last enabled admin and current admin session are protected from self-lockout.

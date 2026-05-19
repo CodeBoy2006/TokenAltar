@@ -9,6 +9,7 @@ pub struct User {
     pub display_name: String,
     pub points_balance: f64,
     pub anonymous_leaderboard: bool,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -12,7 +12,7 @@ It serves an operational Vue console and OpenAI/Anthropic/Gemini-compatible gate
 - SQLite WAL persistence for users, API keys, owner-scoped channels, global and channel-specific pricing, affinity rules, bindings, social economy, and ledger entries.
 - In-memory routing state for cooldowns, surge metrics, and LRU affinity cache.
 - MPSC ledger queue so gateway requests avoid synchronous high-frequency accounting writes.
-- Vue console for login/register, API keys, channels, model prices, affinity rules, dashboard, ledger, settings, transfers, red packets, and leaderboards.
+- Vue console for login/register, user management, API keys, channels, model prices, affinity rules, dashboard, ledger, settings, transfers, red packets, and leaderboards.
 - Built Vue console assets are embedded into the Rust binary, so runtime deployment does not need a `frontend/dist` directory.
 
 ## Run
@@ -47,6 +47,11 @@ When `switch_on_success` is enabled, a successful fallback rewrites the affinity
 Streaming requests follow the same pre-stream retry rule, but once a successful upstream stream has begun the gateway does not interrupt or replay it.
 
 ## Management Controls
+
+Admins can manage accounts from `/api/users`.
+User management supports account creation, profile/role/balance edits, enable/disable, and password resets.
+Disabled users cannot log in or authenticate through existing sessions or API keys; disabling also turns off their active API keys and channels while preserving ledger history.
+The console prevents removing the last enabled admin or disabling the current admin session.
 
 API keys are managed from the console and through `/api/api-keys`.
 Each key supports enable/disable, soft deletion, one-time rotation, optional expiration, a cumulative point spend limit, and an optional model allow-list.

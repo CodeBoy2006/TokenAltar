@@ -879,6 +879,12 @@ caption {
   background: rgba(255, 250, 239, 0.7);
 }
 
+.single-action {
+  display: flex;
+  justify-content: flex-end;
+  margin: -8px 0 14px;
+}
+
 .bulk-meta {
   display: grid;
   min-width: 92px;
@@ -1329,6 +1335,10 @@ td:first-child {
   min-width: 980px;
 }
 
+.user-table {
+  min-width: 1120px;
+}
+
 .select-cell {
   width: 42px;
   padding-right: 0;
@@ -1364,6 +1374,10 @@ td:first-child {
   flex-wrap: wrap;
   gap: 7px;
   min-width: 245px;
+}
+
+.compact-actions {
+  min-width: 150px;
 }
 
 .row-actions button {

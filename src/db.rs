@@ -20,6 +20,28 @@ use crate::{
     settings::{RuntimeSettings, SETTING_DEFAULTS, validate_setting_value},
 };
 
+const MANAGED_USER_SELECT: &str = r#"
+    SELECT u.id, u.email, u.role, u.display_name, u.points_balance,
+           u.anonymous_leaderboard, u.enabled, u.disabled_at, u.created_at, u.updated_at,
+           COALESCE((SELECT COUNT(*) FROM api_keys k WHERE k.user_id = u.id AND k.deleted_at IS NULL), 0) AS api_key_count,
+           COALESCE((SELECT COUNT(*) FROM channels c WHERE c.owner_user_id = u.id AND c.deleted_at IS NULL), 0) AS channel_count,
+           COALESCE((SELECT SUM(l.total_points) FROM ledger_entries l WHERE l.user_id = u.id), 0.0) AS total_spent_points,
+           COALESCE((SELECT SUM(l.provider_points) FROM ledger_entries l WHERE l.provider_user_id = u.id), 0.0) AS total_provider_points
+    FROM users u
+    ORDER BY u.id DESC
+"#;
+
+const MANAGED_USER_SELECT_BY_ID: &str = r#"
+    SELECT u.id, u.email, u.role, u.display_name, u.points_balance,
+           u.anonymous_leaderboard, u.enabled, u.disabled_at, u.created_at, u.updated_at,
+           COALESCE((SELECT COUNT(*) FROM api_keys k WHERE k.user_id = u.id AND k.deleted_at IS NULL), 0) AS api_key_count,
+           COALESCE((SELECT COUNT(*) FROM channels c WHERE c.owner_user_id = u.id AND c.deleted_at IS NULL), 0) AS channel_count,
+           COALESCE((SELECT SUM(l.total_points) FROM ledger_entries l WHERE l.user_id = u.id), 0.0) AS total_spent_points,
+           COALESCE((SELECT SUM(l.provider_points) FROM ledger_entries l WHERE l.provider_user_id = u.id), 0.0) AS total_provider_points
+    FROM users u
+    WHERE u.id = ?
+"#;
+
 #[derive(Clone)]
 pub struct Database {
     pub pool: SqlitePool,
@@ -34,6 +56,48 @@ pub struct DashboardSummary {
     pub spent_points_today: f64,
     pub surge_multiplier: f64,
     pub surge_state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedUser {
+    pub id: i64,
+    pub email: String,
+    pub role: String,
+    pub display_name: String,
+    pub points_balance: f64,
+    pub anonymous_leaderboard: bool,
+    pub enabled: bool,
+    pub disabled_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub api_key_count: i64,
+    pub channel_count: i64,
+    pub total_spent_points: f64,
+    pub total_provider_points: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedUserCreateInput {
+    pub email: String,
+    pub password: String,
+    pub role: String,
+    pub display_name: Option<String>,
+    pub points_balance: Option<f64>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedUserUpdateInput {
+    pub email: String,
+    pub role: String,
+    pub display_name: String,
+    pub points_balance: f64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasswordResetInput {
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,20 +194,70 @@ impl Database {
         Ok(())
     }
 
+    pub async fn create_managed_user(
+        &self,
+        input: ManagedUserCreateInput,
+    ) -> AppResult<ManagedUser> {
+        validate_email(&input.email)?;
+        validate_password(&input.password)?;
+        validate_role(&input.role)?;
+        let display_name = match input.display_name.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => default_display_name(&input.email),
+        };
+        validate_display_name(&display_name)?;
+        let points_balance = match input.points_balance {
+            Some(points) => {
+                validate_points_balance(points)?;
+                points
+            }
+            None => {
+                let settings = self.runtime_settings().await?;
+                if input.role == "admin" {
+                    settings.initial_admin_points
+                } else {
+                    settings.initial_user_points
+                }
+            }
+        };
+        let enabled = input.enabled.unwrap_or(true);
+        let password_hash = hash_password(&input.password)?;
+        let result = sqlx::query(
+            r#"
+            INSERT INTO users(
+              email, password_hash, role, display_name, points_balance, enabled, disabled_at
+            ) VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN NULL ELSE datetime('now') END)
+            "#,
+        )
+        .bind(input.email.trim())
+        .bind(password_hash)
+        .bind(&input.role)
+        .bind(display_name)
+        .bind(points_balance)
+        .bind(if enabled { 1 } else { 0 })
+        .bind(if enabled { 1 } else { 0 })
+        .execute(&self.pool)
+        .await?;
+        self.get_managed_user(result.last_insert_rowid()).await
+    }
+
     pub async fn create_user(
         &self,
         email: &str,
         password: &str,
         display_name: &str,
     ) -> AppResult<User> {
+        validate_email(email)?;
+        validate_password(password)?;
+        validate_display_name(display_name)?;
         let settings = self.runtime_settings().await?;
         let password_hash = hash_password(password)?;
         let result = sqlx::query(
             "INSERT INTO users(email, password_hash, role, display_name, points_balance) VALUES (?, ?, 'user', ?, ?)",
         )
-        .bind(email)
+        .bind(email.trim())
         .bind(password_hash)
-        .bind(display_name)
+        .bind(display_name.trim())
         .bind(settings.initial_user_points)
         .execute(&self.pool)
         .await?;
@@ -152,42 +266,23 @@ impl Database {
 
     pub async fn find_user_with_hash(&self, email: &str) -> AppResult<Option<(User, String)>> {
         let row = sqlx::query(
-            "SELECT id, email, password_hash, role, display_name, points_balance, anonymous_leaderboard FROM users WHERE email = ?",
+            "SELECT id, email, password_hash, role, display_name, points_balance, anonymous_leaderboard, enabled FROM users WHERE email = ?",
         )
         .bind(email)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|row| {
-            (
-                User {
-                    id: row.get("id"),
-                    email: row.get("email"),
-                    role: row.get("role"),
-                    display_name: row.get("display_name"),
-                    points_balance: row.get("points_balance"),
-                    anonymous_leaderboard: row.get::<i64, _>("anonymous_leaderboard") != 0,
-                },
-                row.get("password_hash"),
-            )
-        }))
+        Ok(row.map(|row| (user_from_row(&row), row.get("password_hash"))))
     }
 
     pub async fn get_user(&self, id: i64) -> AppResult<User> {
         let row = sqlx::query(
-            "SELECT id, email, role, display_name, points_balance, anonymous_leaderboard FROM users WHERE id = ?",
+            "SELECT id, email, role, display_name, points_balance, anonymous_leaderboard, enabled FROM users WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?
         .ok_or(AppError::NotFound)?;
-        Ok(User {
-            id: row.get("id"),
-            email: row.get("email"),
-            role: row.get("role"),
-            display_name: row.get("display_name"),
-            points_balance: row.get("points_balance"),
-            anonymous_leaderboard: row.get::<i64, _>("anonymous_leaderboard") != 0,
-        })
+        Ok(user_from_row(&row))
     }
 
     pub async fn create_session(&self, user_id: i64) -> AppResult<String> {
@@ -241,7 +336,192 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?
         .ok_or(AppError::Unauthorized)?;
-        self.get_user(row.get("user_id")).await
+        let user = self.get_user(row.get("user_id")).await?;
+        if user.enabled {
+            Ok(user)
+        } else {
+            Err(AppError::Unauthorized)
+        }
+    }
+
+    pub async fn list_managed_users(&self) -> AppResult<Vec<ManagedUser>> {
+        let rows = sqlx::query(MANAGED_USER_SELECT)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(managed_user_from_row).collect())
+    }
+
+    pub async fn get_managed_user(&self, id: i64) -> AppResult<ManagedUser> {
+        let row = sqlx::query(MANAGED_USER_SELECT_BY_ID)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        Ok(managed_user_from_row(&row))
+    }
+
+    pub async fn update_managed_user(
+        &self,
+        actor_id: i64,
+        id: i64,
+        input: ManagedUserUpdateInput,
+    ) -> AppResult<ManagedUser> {
+        validate_email(&input.email)?;
+        validate_role(&input.role)?;
+        validate_display_name(&input.display_name)?;
+        validate_points_balance(input.points_balance)?;
+        let current = self.get_user(id).await?;
+        if current.role == "admin"
+            && input.role != "admin"
+            && self.enabled_admin_count().await? <= 1
+        {
+            return Err(AppError::BadRequest(
+                "cannot demote the last enabled admin".to_string(),
+            ));
+        }
+        if current.role == "admin"
+            && current.enabled
+            && !input.enabled
+            && self.enabled_admin_count().await? <= 1
+        {
+            return Err(AppError::BadRequest(
+                "cannot disable the last enabled admin".to_string(),
+            ));
+        }
+        if actor_id == id && (!input.enabled || input.role != "admin") {
+            return Err(AppError::BadRequest(
+                "cannot remove your own admin access".to_string(),
+            ));
+        }
+        let result = sqlx::query(
+            r#"
+            UPDATE users
+            SET email = ?, role = ?, display_name = ?, points_balance = ?, enabled = ?,
+                disabled_at = CASE
+                  WHEN ? = 1 THEN NULL
+                  WHEN enabled = 0 THEN disabled_at
+                  ELSE datetime('now')
+                END,
+                updated_at = datetime('now')
+            WHERE id = ?
+            "#,
+        )
+        .bind(input.email.trim())
+        .bind(&input.role)
+        .bind(input.display_name.trim())
+        .bind(input.points_balance)
+        .bind(if input.enabled { 1 } else { 0 })
+        .bind(if input.enabled { 1 } else { 0 })
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
+        if !input.enabled {
+            self.disable_user_resources(id).await?;
+        }
+        self.get_managed_user(id).await
+    }
+
+    pub async fn set_user_enabled(
+        &self,
+        actor_id: i64,
+        id: i64,
+        enabled: bool,
+    ) -> AppResult<ManagedUser> {
+        let current = self.get_user(id).await?;
+        if !enabled
+            && current.role == "admin"
+            && current.enabled
+            && self.enabled_admin_count().await? <= 1
+        {
+            return Err(AppError::BadRequest(
+                "cannot disable the last enabled admin".to_string(),
+            ));
+        }
+        if actor_id == id && !enabled {
+            return Err(AppError::BadRequest(
+                "cannot disable your own account".to_string(),
+            ));
+        }
+        let result = sqlx::query(
+            r#"
+            UPDATE users
+            SET enabled = ?,
+                disabled_at = CASE
+                  WHEN ? = 1 THEN NULL
+                  WHEN enabled = 0 THEN disabled_at
+                  ELSE datetime('now')
+                END,
+                updated_at = datetime('now')
+            WHERE id = ?
+            "#,
+        )
+        .bind(if enabled { 1 } else { 0 })
+        .bind(if enabled { 1 } else { 0 })
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
+        if !enabled {
+            self.disable_user_resources(id).await?;
+        }
+        self.get_managed_user(id).await
+    }
+
+    pub async fn reset_user_password(&self, id: i64, password: &str) -> AppResult<()> {
+        validate_password(password)?;
+        let password_hash = hash_password(password)?;
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(password_hash)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn enabled_admin_count(&self) -> AppResult<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'admin' AND enabled = 1")
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
+    async fn disable_user_resources(&self, user_id: i64) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE api_keys SET enabled = 0, updated_at = datetime('now') WHERE user_id = ? AND deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE channels SET enabled = 0, status = 'manual_disabled', updated_at = datetime('now') WHERE owner_user_id = ? AND deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn create_api_key(
@@ -396,7 +676,7 @@ impl Database {
             SELECT id, user_id, name, key_prefix, enabled, spend_limit_points, spent_points,
                    expires_at, allowed_models_json, last_used_at
             FROM api_keys
-            WHERE key_hash = ? AND deleted_at IS NULL
+            WHERE key_hash = ? AND enabled = 1 AND deleted_at IS NULL
               AND (expires_at IS NULL OR expires_at > datetime('now'))
             "#,
         )
@@ -430,7 +710,7 @@ impl Database {
         }
         let mut tx = self.pool.begin().await?;
         let user_debit = sqlx::query(
-            "UPDATE users SET points_balance = points_balance - ? WHERE id = ? AND points_balance >= ?",
+            "UPDATE users SET points_balance = points_balance - ? WHERE id = ? AND enabled = 1 AND points_balance >= ?",
         )
         .bind(points)
         .bind(user_id)
@@ -1746,6 +2026,37 @@ fn api_key_from_row(row: &sqlx::sqlite::SqliteRow) -> ApiKeyRecord {
     }
 }
 
+fn user_from_row(row: &sqlx::sqlite::SqliteRow) -> User {
+    User {
+        id: row.get("id"),
+        email: row.get("email"),
+        role: row.get("role"),
+        display_name: row.get("display_name"),
+        points_balance: row.get("points_balance"),
+        anonymous_leaderboard: row.get::<i64, _>("anonymous_leaderboard") != 0,
+        enabled: row.get::<i64, _>("enabled") != 0,
+    }
+}
+
+fn managed_user_from_row(row: &sqlx::sqlite::SqliteRow) -> ManagedUser {
+    ManagedUser {
+        id: row.get("id"),
+        email: row.get("email"),
+        role: row.get("role"),
+        display_name: row.get("display_name"),
+        points_balance: row.get("points_balance"),
+        anonymous_leaderboard: row.get::<i64, _>("anonymous_leaderboard") != 0,
+        enabled: row.get::<i64, _>("enabled") != 0,
+        disabled_at: row.get("disabled_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        api_key_count: row.get("api_key_count"),
+        channel_count: row.get("channel_count"),
+        total_spent_points: row.get("total_spent_points"),
+        total_provider_points: row.get("total_provider_points"),
+    }
+}
+
 fn channel_from_row(
     row: &sqlx::sqlite::SqliteRow,
     windows_by_channel: &HashMap<i64, Vec<ChannelQuotaWindow>>,
@@ -1813,6 +2124,57 @@ fn leaderboard_row(row: &sqlx::sqlite::SqliteRow) -> serde_json::Value {
 
 pub fn now_rfc3339() -> String {
     DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339()
+}
+
+fn validate_email(email: &str) -> AppResult<()> {
+    let email = email.trim();
+    if email.len() < 3 || email.len() > 254 || !email.contains('@') {
+        return Err(AppError::BadRequest(
+            "email must be a valid address".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_password(password: &str) -> AppResult<()> {
+    if password.len() < 8 {
+        return Err(AppError::BadRequest(
+            "password must be at least 8 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_role(role: &str) -> AppResult<()> {
+    if matches!(role, "admin" | "user") {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "role must be admin or user".to_string(),
+        ))
+    }
+}
+
+fn validate_display_name(display_name: &str) -> AppResult<()> {
+    if display_name.trim().is_empty() || display_name.chars().count() > 80 {
+        return Err(AppError::BadRequest(
+            "display name must be 1-80 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_points_balance(points: f64) -> AppResult<()> {
+    if !points.is_finite() || points < 0.0 {
+        return Err(AppError::BadRequest(
+            "points balance must be a non-negative finite number".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn default_display_name(email: &str) -> String {
+    email.split('@').next().unwrap_or("user").trim().to_string()
 }
 
 fn validate_api_key_name(name: &str) -> AppResult<()> {

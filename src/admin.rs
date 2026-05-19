@@ -9,7 +9,10 @@ use serde_json::json;
 
 use crate::{
     auth::{ConsoleAuth, require_admin, verify_password},
-    db::{AffinityRuleInput, ApiKeyUpdateInput, ChannelInput, ChannelUpdateInput, SettingUpdate},
+    db::{
+        AffinityRuleInput, ApiKeyUpdateInput, ChannelInput, ChannelUpdateInput,
+        ManagedUserCreateInput, ManagedUserUpdateInput, PasswordResetInput, SettingUpdate,
+    },
     error::{AppError, AppResult},
     gateway::surge_multiplier,
     models::{ModelPrice, User},
@@ -95,11 +98,6 @@ pub async fn register(
     State(state): State<crate::app::AppState>,
     Json(request): Json<RegisterRequest>,
 ) -> AppResult<Json<AuthResponse>> {
-    if request.password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "password must be at least 8 characters".to_string(),
-        ));
-    }
     let invite_required = sqlx::query_scalar::<_, String>(
         "SELECT value FROM system_settings WHERE key = 'invite_required'",
     )
@@ -138,6 +136,9 @@ pub async fn login(
     let Some((user, password_hash)) = state.db.find_user_with_hash(&request.email).await? else {
         return Err(AppError::Unauthorized);
     };
+    if !user.enabled {
+        return Err(AppError::Unauthorized);
+    }
     if !verify_password(&request.password, &password_hash) {
         return Err(AppError::Unauthorized);
     }
@@ -147,6 +148,64 @@ pub async fn login(
 
 pub async fn me(ConsoleAuth(auth): ConsoleAuth) -> AppResult<Json<User>> {
     Ok(Json(auth.user))
+}
+
+pub async fn list_users(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+) -> AppResult<Json<serde_json::Value>> {
+    require_admin(&auth.user)?;
+    Ok(Json(json!(state.db.list_managed_users().await?)))
+}
+
+pub async fn create_user(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Json(request): Json<ManagedUserCreateInput>,
+) -> AppResult<Json<serde_json::Value>> {
+    require_admin(&auth.user)?;
+    Ok(Json(json!(state.db.create_managed_user(request).await?)))
+}
+
+pub async fn update_user(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+    Json(request): Json<ManagedUserUpdateInput>,
+) -> AppResult<Json<serde_json::Value>> {
+    require_admin(&auth.user)?;
+    Ok(Json(json!(
+        state
+            .db
+            .update_managed_user(auth.user.id, id, request)
+            .await?
+    )))
+}
+
+pub async fn set_user_enabled(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+    Json(request): Json<EnabledRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    require_admin(&auth.user)?;
+    Ok(Json(json!(
+        state
+            .db
+            .set_user_enabled(auth.user.id, id, request.enabled)
+            .await?
+    )))
+}
+
+pub async fn reset_user_password(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(auth): ConsoleAuth,
+    Path(id): Path<i64>,
+    Json(request): Json<PasswordResetInput>,
+) -> AppResult<Json<serde_json::Value>> {
+    require_admin(&auth.user)?;
+    state.db.reset_user_password(id, &request.password).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn create_api_key(

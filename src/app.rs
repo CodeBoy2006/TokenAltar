@@ -77,6 +77,19 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/login", post(crate::admin::login))
         .route("/me", get(crate::admin::me))
         .route(
+            "/users",
+            get(crate::admin::list_users).post(crate::admin::create_user),
+        )
+        .route(
+            "/users/{id}",
+            axum::routing::patch(crate::admin::update_user),
+        )
+        .route("/users/{id}/enabled", post(crate::admin::set_user_enabled))
+        .route(
+            "/users/{id}/password",
+            post(crate::admin::reset_user_password),
+        )
+        .route(
             "/api-keys",
             get(crate::admin::list_api_keys).post(crate::admin::create_api_key),
         )

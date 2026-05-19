@@ -57,6 +57,9 @@ async fn auth_from_bearer(state: &AppState, token: &str) -> AppResult<AuthContex
         }
         state.db.mark_api_key_used(api_key.id).await?;
         let user = state.db.get_user(api_key.user_id).await?;
+        if !user.enabled {
+            return Err(AppError::Unauthorized);
+        }
         Ok(AuthContext {
             user,
             api_key: Some(api_key),
