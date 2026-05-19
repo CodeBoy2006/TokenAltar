@@ -26,10 +26,8 @@ use crate::{
         upstream_body, upstream_path,
     },
     routing::{RouteDecision, choose_channel},
+    settings::RuntimeSettings,
 };
-
-const MAX_GATEWAY_ATTEMPTS: usize = 8;
-const RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 
 pub async fn openai_chat_completions(
     State(state): State<AppState>,
@@ -176,10 +174,12 @@ async fn handle_gateway(
     let api_key = auth.api_key.clone().ok_or(AppError::Unauthorized)?;
     ensure_api_key_model_allowed(&api_key, &request.model)?;
     state.db.refresh_channel_windows().await?;
+    let settings = state.db.runtime_settings().await?;
     let global_prices = state.db.global_price_book().await?;
-    let reserve_price = select_price(&request.model, &global_prices);
+    let reserve_price = select_price(&request.model, &global_prices, &settings);
     let token_estimate = crate::tokenizer::estimate_request_tokens(&request);
-    let reserve = token_estimate.tokens as f64 * reserve_price.input_price_per_1k / 1000.0;
+    let reserve = token_estimate.tokens as f64 * reserve_price.input_price_per_1k
+        / settings.pricing_unit_tokens;
     ensure_affordable(&auth.user, &api_key, reserve)?;
 
     let gateway_context = GatewayContext::default();
@@ -196,7 +196,8 @@ async fn handle_gateway(
 
     let request_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
     let route_count = state.db.list_route_channels().await?.len();
-    let max_attempts = route_count.clamp(1, MAX_GATEWAY_ATTEMPTS);
+    let max_attempts = route_count.clamp(1, settings.routing_max_attempts);
+    let retry_cooldown = Duration::from_secs(settings.routing_retry_cooldown_seconds);
     let mut last_retry_error: Option<AppError> = None;
 
     for attempt_index in 0..max_attempts {
@@ -207,6 +208,7 @@ async fn handle_gateway(
             &request.model,
             affinity_hit.clone(),
             &state.router_state,
+            settings.routing_fire_sale_weight_multiplier,
         )
         .await
         {
@@ -221,8 +223,10 @@ async fn handle_gateway(
         let price = select_price(
             &request.model,
             &state.db.price_book_for_channel(decision.channel.id).await?,
+            &settings,
         );
-        let selected_reserve = token_estimate.tokens as f64 * price.input_price_per_1k / 1000.0;
+        let selected_reserve =
+            token_estimate.tokens as f64 * price.input_price_per_1k / settings.pricing_unit_tokens;
         ensure_affordable(&auth.user, &api_key, selected_reserve)?;
         let reservation = match state
             .db
@@ -243,7 +247,7 @@ async fn handle_gateway(
             {
                 state
                     .router_state
-                    .mark_cooldown(decision.channel.id, RETRY_COOLDOWN)
+                    .mark_cooldown(decision.channel.id, retry_cooldown)
                     .await;
                 last_retry_error = Some(err);
                 continue;
@@ -259,7 +263,7 @@ async fn handle_gateway(
                 state.db.release_gateway_reservation(&reservation).await?;
                 state
                     .router_state
-                    .mark_cooldown(decision.channel.id, RETRY_COOLDOWN)
+                    .mark_cooldown(decision.channel.id, retry_cooldown)
                     .await;
                 if can_retry_after_failure(&decision) && has_retry_left(attempt_index, max_attempts)
                 {
@@ -274,7 +278,7 @@ async fn handle_gateway(
         if is_retryable_upstream_status(status) {
             state
                 .router_state
-                .mark_cooldown(decision.channel.id, RETRY_COOLDOWN)
+                .mark_cooldown(decision.channel.id, retry_cooldown)
                 .await;
             if can_retry_after_failure(&decision) && has_retry_left(attempt_index, max_attempts) {
                 state.db.release_gateway_reservation(&reservation).await?;
@@ -697,6 +701,7 @@ async fn finish_streaming_response(
 }
 
 async fn enqueue_ledger(ctx: LedgerContext<'_>, usage: Usage, status: &str) -> AppResult<()> {
+    let settings = ctx.state.db.runtime_settings().await?;
     let surge_multiplier = surge_multiplier(ctx.state).await.0;
     let discount = fire_sale_discount(&ctx.decision.channel);
     let settlement = settle(
@@ -705,6 +710,7 @@ async fn enqueue_ledger(ctx: LedgerContext<'_>, usage: Usage, status: &str) -> A
         surge_multiplier,
         discount,
         ctx.decision.channel.limits.provider_share,
+        &settings,
     );
     let event = LedgerEvent {
         request_id: ctx.request_id.to_string(),
@@ -733,6 +739,10 @@ async fn enqueue_ledger(ctx: LedgerContext<'_>, usage: Usage, status: &str) -> A
 }
 
 pub async fn surge_multiplier(state: &AppState) -> (f64, &'static str) {
+    let settings = state.db.runtime_settings().await.unwrap_or_else(|_| {
+        RuntimeSettings::from_map(&crate::settings::default_map())
+            .expect("built-in runtime settings defaults are valid")
+    });
     let channels = state.db.list_route_channels().await.unwrap_or_default();
     let total_available: i64 = channels
         .iter()
@@ -746,15 +756,15 @@ pub async fn surge_multiplier(state: &AppState) -> (f64, &'static str) {
         })
         .sum();
     if total_available <= 0 {
-        return (1.5, "peak");
+        return (settings.surge_peak_multiplier, "peak");
     }
     let ratio = state.metrics.tokens_last_hour() as f64 / total_available as f64;
-    if ratio < 0.30 {
-        (0.5, "idle")
-    } else if ratio > 0.80 {
-        (1.5, "peak")
+    if ratio < settings.surge_low_threshold {
+        (settings.surge_idle_multiplier, "idle")
+    } else if ratio > settings.surge_high_threshold {
+        (settings.surge_peak_multiplier, "peak")
     } else {
-        (1.0, "normal")
+        (settings.surge_normal_multiplier, "normal")
     }
 }
 

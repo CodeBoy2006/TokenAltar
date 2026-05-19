@@ -60,12 +60,18 @@ When editing an existing channel, an empty `api_key_secret` keeps the stored ups
 The console also exposes channel clone, health test, per-row enable/disable, batch enable/disable, and soft delete operations.
 Health tests record `health_checked_at`, `upstream_latency_ms`, and `last_error` for operator visibility; they do not automatically disable routing.
 
+Runtime settings are managed from `/api/settings`, with the current typed view available at `/api/runtime-settings`.
+Admins can configure seed balances, pricing units and fallback prices, settlement rounding, surge thresholds and multipliers, routing retry/cooldown/weight knobs, ledger/cache capacities, and console defaults for new keys and channels.
+Settings are stored in `system_settings`; request-time economy and routing values are read from the database so most changes apply without rebuilding.
+Startup-sized values such as ledger queue capacity and affinity cache capacity apply when the process starts.
+
 ## Operational Notes
 
 - Channel token windows are refreshed on startup, dashboard/channel reads, and gateway requests.
 - Channel status moves to `cooling` when any configured quota window is exhausted.
 - Regular users can add and manage their own upstream channels. Console channel reads are owner-scoped for regular users and always redact upstream API keys.
 - Model prices are matched per channel first, then fall back to global model defaults managed by admins.
+- If no model price row matches, fallback input/output/cache rates come from Settings instead of code constants.
 - Invite-gated registration is controlled by `invite_required` and `invite_code_default` in the Settings tab.
 - Red packet claims are transaction guarded with unique `(packet, user)` claims.
 - Leaderboards support `period=day` and `period=month`, count successful ledger entries only, and mask users that enable anonymous ranking.

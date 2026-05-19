@@ -36,6 +36,46 @@ async fn transfer_moves_points_losslessly() {
 }
 
 #[tokio::test]
+async fn runtime_settings_drive_seed_balances() {
+    let state = setup_state().await;
+    state
+        .db
+        .upsert_settings(&[
+            tokenaltar::db::SettingUpdate {
+                key: "initial_admin_points".to_string(),
+                value: "2222".to_string(),
+            },
+            tokenaltar::db::SettingUpdate {
+                key: "initial_user_points".to_string(),
+                value: "333".to_string(),
+            },
+        ])
+        .await
+        .unwrap();
+
+    state
+        .db
+        .bootstrap_admin("seeded-admin@example.com", "password123")
+        .await
+        .unwrap();
+    let admin = state
+        .db
+        .find_user_with_hash("seeded-admin@example.com")
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let user = state
+        .db
+        .create_user("seeded-user@example.com", "password123", "Seeded")
+        .await
+        .unwrap();
+
+    assert_eq!(admin.points_balance, 2222.0);
+    assert_eq!(user.points_balance, 333.0);
+}
+
+#[tokio::test]
 async fn red_packet_claim_is_single_use_per_user() {
     let state = setup_state().await;
     let creator = state

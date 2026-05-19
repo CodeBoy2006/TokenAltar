@@ -56,6 +56,30 @@ type RankedLeaderboardRow = LeaderboardRow & {
   tone: 'gold' | 'lapis' | 'olive' | 'plain'
 }
 
+type DefaultChannelWindow = {
+  name: string
+  limit_tokens: number
+  period_unit: string
+  period_count: number
+  timezone: string
+}
+
+type RuntimeSettings = Record<string, any> & {
+  default_api_key_spend_limit_points?: number
+  default_channel_name?: string
+  default_channel_provider?: string
+  default_channel_base_url?: string
+  default_channel_models?: string
+  default_channel_windows?: DefaultChannelWindow[]
+  default_channel_fire_sale_days_before?: number
+  default_channel_fire_sale_remaining_pct?: number
+  default_channel_fire_sale_discount?: number
+  default_channel_provider_share?: number
+  fallback_input_price_per_unit?: number
+  fallback_output_price_per_unit?: number
+  fallback_cache_price_per_unit?: number
+}
+
 const token = ref(localStorage.getItem('tokenaltar_token') || '')
 const user = ref<User | null>(null)
 const error = ref('')
@@ -71,6 +95,7 @@ const redPackets = ref<any[]>([])
 const leaderboards = ref<LeaderboardPayload>({ providers: [], consumers: [] })
 const leaderboardPeriod = ref<'day' | 'month'>('month')
 const settings = ref<any[]>([])
+const runtimeSettings = ref<RuntimeSettings>({})
 const dashboard = ref<Dashboard | null>(null)
 const newApiKey = ref('')
 const claimResult = ref('')
@@ -86,34 +111,30 @@ const loginForm = reactive({ email: '', password: '' })
 const registerForm = reactive({ email: '', password: '', display_name: '', invite_code: '' })
 const apiKeyForm = reactive({
   name: 'local-dev',
-  spend_limit_points: 1000 as number | null,
+  spend_limit_points: null as number | null,
   enabled: true,
   expires_at: '',
   allowed_models: '',
 })
 const channelForm = reactive({
-  name: 'OpenAI Pool',
-  provider: 'openai',
-  base_url: 'https://api.openai.com',
+  name: '',
+  provider: '',
+  base_url: '',
   api_key_secret: '',
-  models: 'gpt-*,gpt-4o*',
+  models: '',
   enabled: true,
-  windows: [
-    { name: 'Monthly', limit_tokens: 1000000, period_unit: 'month', period_count: 1, anchor_at: defaultAnchor(), timezone: 'UTC' },
-    { name: 'Daily', limit_tokens: 200000, period_unit: 'day', period_count: 1, anchor_at: defaultAnchor(), timezone: 'UTC' },
-    { name: 'Hourly', limit_tokens: 50000, period_unit: 'hour', period_count: 1, anchor_at: defaultAnchor(), timezone: 'UTC' },
-  ],
-  fire_sale_days_before: 3,
-  fire_sale_remaining_pct: 0.25,
-  fire_sale_discount: 0.2,
-  provider_share: 0.7,
+  windows: [] as Array<DefaultChannelWindow & { anchor_at: string }>,
+  fire_sale_days_before: null as number | null,
+  fire_sale_remaining_pct: null as number | null,
+  fire_sale_discount: null as number | null,
+  provider_share: null as number | null,
 })
 const priceForm = reactive({
   channel_id: null as number | null,
   model_pattern: 'default',
-  input_price_per_1k: 1,
-  output_price_per_1k: 3,
-  cache_price_per_1k: 0.2,
+  input_price_per_1k: null as number | null,
+  output_price_per_1k: null as number | null,
+  cache_price_per_1k: null as number | null,
 })
 const ruleForm = reactive({
   name: 'tenant-session',
@@ -131,7 +152,41 @@ const ruleForm = reactive({
 const transferForm = reactive({ to_user_id: 0, points: 10, memo: '@TokenAltar PayTo:' })
 const redPacketForm = reactive({ phrase: 'RustIsBest', total_points: 30, total_parts: 3, mode: 'even' })
 const claimForm = reactive({ phrase: 'RustIsBest' })
-const settingsForm = reactive({ invite_required: 'false', invite_code_default: 'TOKENALTAR' })
+const settingsForm = reactive<Record<string, string>>({
+  invite_required: 'false',
+  invite_code_default: 'TOKENALTAR',
+})
+const settingsSchema = [
+  { key: 'invite_required', label: 'Invite Required', type: 'boolean' },
+  { key: 'invite_code_default', label: 'Default Invite Code', type: 'text' },
+  { key: 'initial_admin_points', label: 'Initial Admin Points', type: 'number' },
+  { key: 'initial_user_points', label: 'Initial User Points', type: 'number' },
+  { key: 'pricing_unit_tokens', label: 'Pricing Unit Tokens', type: 'number' },
+  { key: 'settlement_round_digits', label: 'Settlement Round Digits', type: 'number' },
+  { key: 'fallback_input_price_per_unit', label: 'Fallback Input Price', type: 'number' },
+  { key: 'fallback_output_price_per_unit', label: 'Fallback Output Price', type: 'number' },
+  { key: 'fallback_cache_price_per_unit', label: 'Fallback Cache Price', type: 'number' },
+  { key: 'surge_low_threshold', label: 'Surge Low Threshold', type: 'number' },
+  { key: 'surge_high_threshold', label: 'Surge High Threshold', type: 'number' },
+  { key: 'surge_idle_multiplier', label: 'Surge Idle Multiplier', type: 'number' },
+  { key: 'surge_normal_multiplier', label: 'Surge Normal Multiplier', type: 'number' },
+  { key: 'surge_peak_multiplier', label: 'Surge Peak Multiplier', type: 'number' },
+  { key: 'routing_max_attempts', label: 'Routing Max Attempts', type: 'number' },
+  { key: 'routing_retry_cooldown_seconds', label: 'Retry Cooldown Seconds', type: 'number' },
+  { key: 'routing_fire_sale_weight_multiplier', label: 'Fire Sale Route Weight', type: 'number' },
+  { key: 'ledger_queue_capacity', label: 'Ledger Queue Capacity', type: 'number' },
+  { key: 'affinity_cache_capacity', label: 'Affinity Cache Capacity', type: 'number' },
+  { key: 'default_api_key_spend_limit_points', label: 'Default API Key Spend Limit', type: 'number' },
+  { key: 'default_channel_name', label: 'Default Channel Name', type: 'text' },
+  { key: 'default_channel_provider', label: 'Default Channel Provider', type: 'text' },
+  { key: 'default_channel_base_url', label: 'Default Channel Base URL', type: 'text' },
+  { key: 'default_channel_models', label: 'Default Channel Models', type: 'text' },
+  { key: 'default_channel_windows_json', label: 'Default Channel Windows JSON', type: 'textarea' },
+  { key: 'default_channel_fire_sale_days_before', label: 'Default Fire Sale Days', type: 'number' },
+  { key: 'default_channel_fire_sale_remaining_pct', label: 'Default Fire Sale Remaining', type: 'number' },
+  { key: 'default_channel_fire_sale_discount', label: 'Default Fire Sale Discount', type: 'number' },
+  { key: 'default_channel_provider_share', label: 'Default Provider Share', type: 'number' },
+]
 
 const isAdmin = computed(() => user.value?.role === 'admin')
 const tabDetails: Record<TabId, { eyebrow: string; title: string; description: string }> = {
@@ -342,6 +397,7 @@ async function refreshAll() {
       rules.value = []
       settings.value = []
     }
+    await loadRuntimeSettings()
     await Promise.all([
       loadDashboard(),
       loadApiKeys(),
@@ -377,13 +433,19 @@ async function loadTransfers() { transfers.value = await api('/transfers') }
 async function loadRedPackets() { redPackets.value = await api('/red-packets') }
 async function loadLeaderboards() { leaderboards.value = await api(`/leaderboards?period=${leaderboardPeriod.value}`) }
 
+async function loadRuntimeSettings() {
+  runtimeSettings.value = await api('/runtime-settings')
+  applyRuntimeDefaults()
+}
+
 async function loadSettings() {
-  settings.value = await api('/settings')
+  const payload = await api('/settings')
+  settings.value = payload.settings || []
+  runtimeSettings.value = payload.runtime || runtimeSettings.value
   for (const setting of settings.value) {
-    if (setting.key in settingsForm) {
-      ;(settingsForm as any)[setting.key] = setting.value
-    }
+    settingsForm[setting.key] = setting.value
   }
+  applyRuntimeDefaults()
 }
 
 async function createApiKey() {
@@ -462,7 +524,7 @@ function selectApiKey(record: any) {
 function resetApiKeyForm() {
   editingApiKeyId.value = null
   apiKeyForm.name = 'local-dev'
-  apiKeyForm.spend_limit_points = 1000
+  apiKeyForm.spend_limit_points = runtimeSettings.value.default_api_key_spend_limit_points ?? null
   apiKeyForm.enabled = true
   apiKeyForm.expires_at = ''
   apiKeyForm.allowed_models = ''
@@ -550,26 +612,25 @@ function selectChannel(channel: any) {
 
 function resetChannelForm() {
   editingChannelId.value = null
-  channelForm.name = 'OpenAI Pool'
-  channelForm.provider = 'openai'
-  channelForm.base_url = 'https://api.openai.com'
+  channelForm.name = runtimeSettings.value.default_channel_name || ''
+  channelForm.provider = runtimeSettings.value.default_channel_provider || ''
+  channelForm.base_url = runtimeSettings.value.default_channel_base_url || ''
   channelForm.api_key_secret = ''
-  channelForm.models = 'gpt-*,gpt-4o*'
+  channelForm.models = runtimeSettings.value.default_channel_models || ''
   channelForm.enabled = true
   channelForm.windows = defaultWindows()
-  channelForm.fire_sale_days_before = 3
-  channelForm.fire_sale_remaining_pct = 0.25
-  channelForm.fire_sale_discount = 0.2
-  channelForm.provider_share = 0.7
+  channelForm.fire_sale_days_before = runtimeSettings.value.default_channel_fire_sale_days_before ?? null
+  channelForm.fire_sale_remaining_pct = runtimeSettings.value.default_channel_fire_sale_remaining_pct ?? null
+  channelForm.fire_sale_discount = runtimeSettings.value.default_channel_fire_sale_discount ?? null
+  channelForm.provider_share = runtimeSettings.value.default_channel_provider_share ?? null
 }
 
 function defaultWindows() {
   const anchor = defaultAnchor()
-  return [
-    { name: 'Monthly', limit_tokens: 1000000, period_unit: 'month', period_count: 1, anchor_at: anchor, timezone: 'UTC' },
-    { name: 'Daily', limit_tokens: 200000, period_unit: 'day', period_count: 1, anchor_at: anchor, timezone: 'UTC' },
-    { name: 'Hourly', limit_tokens: 50000, period_unit: 'hour', period_count: 1, anchor_at: anchor, timezone: 'UTC' },
-  ]
+  return (runtimeSettings.value.default_channel_windows || []).map((window) => ({
+    ...window,
+    anchor_at: anchor,
+  }))
 }
 
 function defaultAnchor() {
@@ -588,13 +649,14 @@ function cloneWindows(windows: any[]) {
 }
 
 function addQuotaWindow() {
+  const template = runtimeSettings.value.default_channel_windows?.[0]
   channelForm.windows.push({
-    name: 'Window',
-    limit_tokens: 100000,
-    period_unit: 'day',
-    period_count: 1,
+    name: template?.name || 'Window',
+    limit_tokens: Number(template?.limit_tokens || 1),
+    period_unit: template?.period_unit || 'day',
+    period_count: Number(template?.period_count || 1),
     anchor_at: defaultAnchor(),
-    timezone: 'UTC',
+    timezone: template?.timezone || 'UTC',
   })
 }
 
@@ -699,12 +761,49 @@ async function setLeaderboardPeriod(period: 'day' | 'month') {
 async function saveSettings() {
   await api('/settings', {
     method: 'POST',
-    body: JSON.stringify([
-      { key: 'invite_required', value: settingsForm.invite_required },
-      { key: 'invite_code_default', value: settingsForm.invite_code_default },
-    ]),
+    body: JSON.stringify(settingsSchema.map((item) => ({
+      key: item.key,
+      value: settingsForm[item.key],
+    }))),
   })
   await loadSettings()
+}
+
+function applyRuntimeDefaults() {
+  if (!priceForm.channel_id && channels.value.length > 0) {
+    priceForm.channel_id = channels.value[0].id
+  }
+  if (!editingApiKeyId.value && apiKeyForm.spend_limit_points === null) {
+    apiKeyForm.spend_limit_points = runtimeSettings.value.default_api_key_spend_limit_points ?? null
+  }
+  channelForm.name = channelForm.name || runtimeSettings.value.default_channel_name || ''
+  channelForm.provider = channelForm.provider || runtimeSettings.value.default_channel_provider || ''
+  channelForm.base_url = channelForm.base_url || runtimeSettings.value.default_channel_base_url || ''
+  channelForm.models = channelForm.models || runtimeSettings.value.default_channel_models || ''
+  if (!channelForm.windows.length) {
+    channelForm.windows = defaultWindows()
+  }
+  if (channelForm.fire_sale_days_before === null) {
+    channelForm.fire_sale_days_before = runtimeSettings.value.default_channel_fire_sale_days_before ?? null
+  }
+  if (channelForm.fire_sale_remaining_pct === null) {
+    channelForm.fire_sale_remaining_pct = runtimeSettings.value.default_channel_fire_sale_remaining_pct ?? null
+  }
+  if (channelForm.fire_sale_discount === null) {
+    channelForm.fire_sale_discount = runtimeSettings.value.default_channel_fire_sale_discount ?? null
+  }
+  if (channelForm.provider_share === null) {
+    channelForm.provider_share = runtimeSettings.value.default_channel_provider_share ?? null
+  }
+  if (priceForm.input_price_per_1k === null) {
+    priceForm.input_price_per_1k = runtimeSettings.value.fallback_input_price_per_unit ?? null
+  }
+  if (priceForm.output_price_per_1k === null) {
+    priceForm.output_price_per_1k = runtimeSettings.value.fallback_output_price_per_unit ?? null
+  }
+  if (priceForm.cache_price_per_1k === null) {
+    priceForm.cache_price_per_1k = runtimeSettings.value.fallback_cache_price_per_unit ?? null
+  }
 }
 
 async function refreshMe() {
@@ -1265,10 +1364,17 @@ onMounted(refreshAll)
         </section>
 
         <section v-if="activeTab === 'settings' && isAdmin">
-          <div class="toolbar"><div><h3>Invite controls</h3><p>Local controls for invite-gated circles.</p></div><button @click="saveSettings">Save</button></div>
-          <div class="form-grid compact panel">
-            <label>Invite Required <select v-model="settingsForm.invite_required"><option value="false">false</option><option value="true">true</option></select></label>
-            <label>Default Invite Code <input v-model="settingsForm.invite_code_default" /></label>
+          <div class="toolbar"><div><h3>Runtime controls</h3><p>Gateway economy, routing, capacity, and console defaults.</p></div><button @click="saveSettings">Save</button></div>
+          <div class="form-grid panel settings-grid">
+            <label v-for="item in settingsSchema" :key="item.key" :class="{ wide: item.type === 'textarea' }">
+              {{ item.label }}
+              <select v-if="item.type === 'boolean'" v-model="settingsForm[item.key]">
+                <option value="false">false</option>
+                <option value="true">true</option>
+              </select>
+              <textarea v-else-if="item.type === 'textarea'" v-model="settingsForm[item.key]" rows="5"></textarea>
+              <input v-else v-model="settingsForm[item.key]" :type="item.type" :step="item.type === 'number' ? 'any' : undefined" />
+            </label>
           </div>
           <div class="table-shell">
             <table><tbody><tr v-for="setting in settings" :key="setting.key"><td>{{ setting.key }}</td><td>{{ setting.value }}</td><td>{{ setting.updated_at }}</td></tr></tbody></table>

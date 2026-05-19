@@ -235,6 +235,103 @@ async fn channel_price_override_is_used_for_settlement() {
 }
 
 #[tokio::test]
+async fn runtime_settings_drive_fallback_price_and_surge_multipliers() {
+    let upstream = spawn_upstream(json!({
+        "id": "resp_runtime_settings",
+        "model": "unknown-price-model",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+        "usage": {"input_tokens": 1000, "output_tokens": 1000}
+    }))
+    .await;
+    let (state, token) = setup_state(upstream).await;
+    state
+        .db
+        .upsert_settings(&[
+            tokenaltar::db::SettingUpdate {
+                key: "fallback_input_price_per_unit".to_string(),
+                value: "7".to_string(),
+            },
+            tokenaltar::db::SettingUpdate {
+                key: "fallback_output_price_per_unit".to_string(),
+                value: "11".to_string(),
+            },
+            tokenaltar::db::SettingUpdate {
+                key: "fallback_cache_price_per_unit".to_string(),
+                value: "0".to_string(),
+            },
+            tokenaltar::db::SettingUpdate {
+                key: "surge_idle_multiplier".to_string(),
+                value: "0.25".to_string(),
+            },
+        ])
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM model_prices WHERE channel_id IS NULL")
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({"model": "unknown-price-model", "input": "hello"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let row: (f64, f64, f64, f64) = sqlx::query_as(
+        "SELECT input_price_per_1k, output_price_per_1k, surge_multiplier, total_points FROM ledger_entries WHERE model = 'unknown-price-model'",
+    )
+    .fetch_one(&state.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, 7.0);
+    assert_eq!(row.1, 11.0);
+    assert_eq!(row.2, 0.25);
+    assert_eq!(row.3, 4.5);
+}
+
+#[tokio::test]
+async fn routing_max_attempts_is_runtime_configurable() {
+    let failing = spawn_status_upstream(StatusCode::BAD_GATEWAY).await;
+    let backup = spawn_upstream(json!({
+        "id": "resp_should_be_blocked_by_attempt_limit",
+        "model": "gpt-test",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "unexpected"}]}],
+        "usage": {"input_tokens": 8, "output_tokens": 3}
+    }))
+    .await;
+    let (state, token) = setup_state(failing).await;
+    add_test_channel(&state, backup, "openai").await;
+    bind_tenant_affinity(&state, 1, false).await;
+    state
+        .db
+        .upsert_settings(&[tokenaltar::db::SettingUpdate {
+            key: "routing_max_attempts".to_string(),
+            value: "1".to_string(),
+        }])
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+
+    let response = app.oneshot(retry_request(&token, "alpha")).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(state.db.list_ledger(None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn openai_responses_to_openai_channel_is_passthrough() {
     let upstream = spawn_echo_upstream().await;
     let (state, token) = setup_state(upstream).await;

@@ -14,9 +14,10 @@ use crate::{
     auth::{generate_token, hash_password, hash_token},
     error::{AppError, AppResult},
     models::{
-        AffinityRule, ApiKeyRecord, Channel, ChannelLimits, ChannelQuotaWindow,
-        GatewayReservation, LedgerEvent, ModelPrice, PublicChannel, User, json_array_to_strings,
+        AffinityRule, ApiKeyRecord, Channel, ChannelLimits, ChannelQuotaWindow, GatewayReservation,
+        LedgerEvent, ModelPrice, PublicChannel, User, json_array_to_strings,
     },
+    settings::{RuntimeSettings, SETTING_DEFAULTS, validate_setting_value},
 };
 
 #[derive(Clone)]
@@ -79,7 +80,33 @@ impl Database {
             .run(&pool)
             .await
             .map_err(|err| AppError::Anyhow(anyhow::anyhow!(err)))?;
-        Ok(Self { pool })
+        let db = Self { pool };
+        db.ensure_setting_defaults().await?;
+        Ok(db)
+    }
+
+    pub async fn ensure_setting_defaults(&self) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+        for (key, value) in SETTING_DEFAULTS {
+            sqlx::query("INSERT OR IGNORE INTO system_settings(key, value) VALUES (?, ?)")
+                .bind(key)
+                .bind(value)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn runtime_settings(&self) -> AppResult<RuntimeSettings> {
+        let rows = sqlx::query("SELECT key, value FROM system_settings")
+            .fetch_all(&self.pool)
+            .await?;
+        let values = rows
+            .iter()
+            .map(|row| (row.get::<String, _>("key"), row.get::<String, _>("value")))
+            .collect::<HashMap<_, _>>();
+        RuntimeSettings::from_map(&values)
     }
 
     pub async fn bootstrap_admin(&self, email: &str, password: &str) -> AppResult<()> {
@@ -90,12 +117,14 @@ impl Database {
         if existing.is_some() {
             return Ok(());
         }
+        let settings = self.runtime_settings().await?;
         let password_hash = hash_password(password)?;
         sqlx::query(
-            "INSERT INTO users(email, password_hash, role, display_name, points_balance) VALUES (?, ?, 'admin', 'Admin', 1000000)",
+            "INSERT INTO users(email, password_hash, role, display_name, points_balance) VALUES (?, ?, 'admin', 'Admin', ?)",
         )
         .bind(email)
         .bind(password_hash)
+        .bind(settings.initial_admin_points)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -107,13 +136,15 @@ impl Database {
         password: &str,
         display_name: &str,
     ) -> AppResult<User> {
+        let settings = self.runtime_settings().await?;
         let password_hash = hash_password(password)?;
         let result = sqlx::query(
-            "INSERT INTO users(email, password_hash, role, display_name, points_balance) VALUES (?, ?, 'user', ?, 1000)",
+            "INSERT INTO users(email, password_hash, role, display_name, points_balance) VALUES (?, ?, 'user', ?, ?)",
         )
         .bind(email)
         .bind(password_hash)
         .bind(display_name)
+        .bind(settings.initial_user_points)
         .execute(&self.pool)
         .await?;
         self.get_user(result.last_insert_rowid()).await
@@ -1309,6 +1340,9 @@ impl Database {
     }
 
     pub async fn upsert_settings(&self, settings: &[SettingUpdate]) -> AppResult<()> {
+        for setting in settings {
+            validate_setting_value(&setting.key, &setting.value)?;
+        }
         let mut tx = self.pool.begin().await?;
         for setting in settings {
             sqlx::query(
@@ -2031,10 +2065,26 @@ fn compute_window_bounds(
     let anchor = parse_local_anchor(&definition.anchor_at, tz)?;
     let local_now = now.with_timezone(&tz);
     let start = match definition.period_unit.as_str() {
-        "minute" => fixed_window_start(anchor, local_now, chrono::Duration::minutes(definition.period_count)),
-        "hour" => fixed_window_start(anchor, local_now, chrono::Duration::hours(definition.period_count)),
-        "day" => fixed_window_start(anchor, local_now, chrono::Duration::days(definition.period_count)),
-        "week" => fixed_window_start(anchor, local_now, chrono::Duration::weeks(definition.period_count)),
+        "minute" => fixed_window_start(
+            anchor,
+            local_now,
+            chrono::Duration::minutes(definition.period_count),
+        ),
+        "hour" => fixed_window_start(
+            anchor,
+            local_now,
+            chrono::Duration::hours(definition.period_count),
+        ),
+        "day" => fixed_window_start(
+            anchor,
+            local_now,
+            chrono::Duration::days(definition.period_count),
+        ),
+        "week" => fixed_window_start(
+            anchor,
+            local_now,
+            chrono::Duration::weeks(definition.period_count),
+        ),
         "month" => month_window_start(anchor, local_now, definition.period_count)?,
         "year" => month_window_start(anchor, local_now, definition.period_count * 12)?,
         other => {
@@ -2074,9 +2124,14 @@ fn parse_local_anchor(anchor_at: &str, timezone: Tz) -> AppResult<DateTime<Tz>> 
 }
 
 fn resolve_local_datetime(timezone: Tz, naive: NaiveDateTime) -> AppResult<DateTime<Tz>> {
-    timezone.from_local_datetime(&naive).earliest().ok_or_else(|| {
-        AppError::BadRequest("quota window anchor falls into a nonexistent local time".to_string())
-    })
+    timezone
+        .from_local_datetime(&naive)
+        .earliest()
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "quota window anchor falls into a nonexistent local time".to_string(),
+            )
+        })
 }
 
 fn fixed_window_start(
@@ -2106,8 +2161,8 @@ fn month_window_start(
     if now < anchor {
         return Ok(anchor);
     }
-    let elapsed_months = (now.year() - anchor.year()) as i64 * 12 + now.month() as i64
-        - anchor.month() as i64;
+    let elapsed_months =
+        (now.year() - anchor.year()) as i64 * 12 + now.month() as i64 - anchor.month() as i64;
     let mut periods = elapsed_months.div_euclid(period_months).max(0);
     let mut start = add_months_clamped(anchor, periods * period_months)?;
     while advance_window(start, "month", period_months)? <= now {

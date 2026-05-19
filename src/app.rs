@@ -46,8 +46,10 @@ impl AppState {
             db.bootstrap_admin(email, password).await?;
         }
         db.refresh_channel_windows().await?;
+        let settings = db.runtime_settings().await?;
         let metrics = MetricsState::default();
-        let ledger_tx = spawn_ledger_worker(db.clone(), metrics.clone());
+        let ledger_tx =
+            spawn_ledger_worker(db.clone(), metrics.clone(), settings.ledger_queue_capacity);
         let http = Client::builder()
             .timeout(Duration::from_secs(120))
             .pool_idle_timeout(Duration::from_secs(30))
@@ -55,7 +57,7 @@ impl AppState {
         Ok(Self {
             db,
             http,
-            affinity_cache: AffinityCache::new(4096),
+            affinity_cache: AffinityCache::new(settings.affinity_cache_capacity),
             router_state: RuntimeRouterState::default(),
             metrics,
             ledger_tx,
@@ -119,6 +121,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/ledger", get(crate::admin::list_ledger))
         .route("/dashboard", get(crate::admin::dashboard))
+        .route("/runtime-settings", get(crate::admin::runtime_settings))
         .route(
             "/settings",
             get(crate::admin::get_settings).post(crate::admin::update_settings),

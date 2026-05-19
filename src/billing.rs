@@ -5,8 +5,12 @@ use crate::{db::Database, models::LedgerEvent, state::MetricsState};
 
 pub type LedgerSender = mpsc::Sender<LedgerEvent>;
 
-pub fn spawn_ledger_worker(db: Database, metrics: MetricsState) -> LedgerSender {
-    let (tx, mut rx) = mpsc::channel::<LedgerEvent>(4096);
+pub fn spawn_ledger_worker(
+    db: Database,
+    metrics: MetricsState,
+    queue_capacity: usize,
+) -> LedgerSender {
+    let (tx, mut rx) = mpsc::channel::<LedgerEvent>(queue_capacity);
     tokio::spawn(async move {
         info!("ledger worker started");
         while let Some(event) = rx.recv().await {

@@ -11,5 +11,6 @@ pub mod models;
 pub mod pricing;
 pub mod protocol;
 pub mod routing;
+pub mod settings;
 pub mod state;
 pub mod tokenizer;

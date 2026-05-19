@@ -54,6 +54,7 @@ body::before {
 
 button,
 input,
+textarea,
 select {
   font: inherit;
 }
@@ -104,6 +105,7 @@ button.light {
 }
 
 input,
+textarea,
 select {
   width: 100%;
   min-height: 39px;
@@ -119,9 +121,15 @@ select {
 }
 
 input:focus,
+textarea:focus,
 select:focus {
   border-color: #b88334;
   box-shadow: 0 0 0 3px rgba(184, 131, 52, 0.16);
+}
+
+textarea {
+  min-height: 120px;
+  resize: vertical;
 }
 
 label {
@@ -1226,6 +1234,10 @@ caption {
 .form-row.panel,
 .form-grid.panel {
   padding: 18px;
+}
+
+.settings-grid label.wide {
+  grid-column: 1 / -1;
 }
 
 .quota-editor {

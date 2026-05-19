@@ -425,7 +425,19 @@ pub async fn get_settings(
     ConsoleAuth(auth): ConsoleAuth,
 ) -> AppResult<Json<serde_json::Value>> {
     require_admin(&auth.user)?;
-    Ok(Json(json!(state.db.list_settings().await?)))
+    let settings = state.db.list_settings().await?;
+    let runtime = state.db.runtime_settings().await?;
+    Ok(Json(json!({
+        "settings": settings,
+        "runtime": runtime,
+    })))
+}
+
+pub async fn runtime_settings(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(_auth): ConsoleAuth,
+) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(json!(state.db.runtime_settings().await?)))
 }
 
 pub async fn update_settings(

@@ -51,6 +51,7 @@ pub async fn choose_channel(
     model: &str,
     affinity_hit: Option<AffinityHit>,
     runtime: &RuntimeRouterState,
+    fire_sale_weight_multiplier: f64,
 ) -> AppResult<RouteDecision> {
     let healthy = filter_healthy(channels, model, runtime).await;
     if healthy.is_empty() {
@@ -76,7 +77,7 @@ pub async fn choose_channel(
         }
     }
 
-    if let Some(channel) = weighted_choice(&healthy, true) {
+    if let Some(channel) = weighted_choice(&healthy, true, fire_sale_weight_multiplier) {
         return Ok(RouteDecision {
             fire_sale: is_fire_sale(&channel),
             channel,
@@ -84,7 +85,8 @@ pub async fn choose_channel(
         });
     }
 
-    let channel = weighted_choice(&healthy, false).expect("healthy not empty");
+    let channel =
+        weighted_choice(&healthy, false, fire_sale_weight_multiplier).expect("healthy not empty");
     Ok(RouteDecision {
         fire_sale: is_fire_sale(&channel),
         channel,
@@ -121,7 +123,11 @@ async fn filter_healthy<'a>(
     healthy
 }
 
-fn weighted_choice(channels: &[&Channel], fire_sale_only: bool) -> Option<Channel> {
+fn weighted_choice(
+    channels: &[&Channel],
+    fire_sale_only: bool,
+    fire_sale_weight_multiplier: f64,
+) -> Option<Channel> {
     let candidates = channels
         .iter()
         .copied()
@@ -141,7 +147,7 @@ fn weighted_choice(channels: &[&Channel], fire_sale_only: bool) -> Option<Channe
                 .unwrap_or_default();
             let mut weight = remaining.max(1) as f64;
             if is_fire_sale(channel) {
-                weight *= 5.0;
+                weight *= fire_sale_weight_multiplier;
             }
             weight
         })
@@ -203,7 +209,7 @@ mod tests {
                 limits: limits(100),
             },
         ];
-        let decision = choose_channel(&channels, "gpt-test", None, &runtime)
+        let decision = choose_channel(&channels, "gpt-test", None, &runtime, 5.0)
             .await
             .unwrap();
         assert_eq!(decision.channel.id, 2);

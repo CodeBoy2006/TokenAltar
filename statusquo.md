@@ -137,3 +137,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Login autocomplete and API payload bindings are unchanged; this only removes the UI seed value.
+
+## [2026-05-19 16:37] Runtime Economy Configuration
+- **Changes:** Added DB-backed runtime settings for seed balances, pricing fallback, settlement rounding, surge multipliers, routing retry/cooldown/weight knobs, queue/cache capacities, and console key/channel defaults; wired backend gateway/routing/pricing paths and the Vue Settings tab to those values.
+- **Status:** Completed
+- **Next Steps:** Restart the service after changing startup-sized settings such as ledger queue capacity or affinity cache capacity.
+- **Context:** Request-time settings apply from `system_settings`; global/channel model price rows still override fallback prices before the configured fallback is used.

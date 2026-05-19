@@ -3,6 +3,7 @@ use regex::Regex;
 
 use crate::{
     models::{Channel, ModelPrice, Usage},
+    settings::RuntimeSettings,
     tokenizer::estimate_text_tokens,
 };
 
@@ -13,18 +14,12 @@ pub struct Settlement {
     pub formula_note: String,
 }
 
-pub fn select_price(model: &str, prices: &[ModelPrice]) -> ModelPrice {
+pub fn select_price(model: &str, prices: &[ModelPrice], settings: &RuntimeSettings) -> ModelPrice {
     scoped_match(model, prices, true)
         .or_else(|| scoped_default(prices, true))
         .or_else(|| scoped_match(model, prices, false))
         .or_else(|| scoped_default(prices, false))
-        .unwrap_or(ModelPrice {
-            channel_id: None,
-            model_pattern: "default".to_string(),
-            input_price_per_1k: 1.0,
-            output_price_per_1k: 3.0,
-            cache_price_per_1k: 0.2,
-        })
+        .unwrap_or_else(|| settings.fallback_price())
 }
 
 fn scoped_match(model: &str, prices: &[ModelPrice], channel_scoped: bool) -> Option<ModelPrice> {
@@ -55,21 +50,31 @@ pub fn settle(
     surge_multiplier: f64,
     fire_sale_discount: f64,
     provider_share: f64,
+    settings: &RuntimeSettings,
 ) -> Settlement {
     let base = (usage.input_tokens as f64 * price.input_price_per_1k
         + usage.output_tokens as f64 * price.output_price_per_1k
         + usage.cache_tokens as f64 * price.cache_price_per_1k)
-        / 1000.0;
-    let total_points = round4(base * surge_multiplier * fire_sale_discount);
-    let provider_points = round4(total_points * provider_share);
+        / settings.pricing_unit_tokens;
+    let total_points = round_to_digits(
+        base * surge_multiplier * fire_sale_discount,
+        settings.settlement_round_digits,
+    );
+    let provider_points = round_to_digits(
+        total_points * provider_share,
+        settings.settlement_round_digits,
+    );
     let formula_note = format!(
-        "input {} * {:.4}/1k + cache {} * {:.4}/1k + output {} * {:.4}/1k, surge {:.2}x, fire sale {:.2}x",
+        "input {} * {:.4}/{} tokens + cache {} * {:.4}/{} tokens + output {} * {:.4}/{} tokens, surge {:.2}x, fire sale {:.2}x",
         usage.input_tokens,
         price.input_price_per_1k,
+        settings.pricing_unit_tokens,
         usage.cache_tokens,
         price.cache_price_per_1k,
+        settings.pricing_unit_tokens,
         usage.output_tokens,
         price.output_price_per_1k,
+        settings.pricing_unit_tokens,
         surge_multiplier,
         fire_sale_discount
     );
@@ -80,8 +85,9 @@ pub fn settle(
     }
 }
 
-pub fn reserve_cost(text: &str, price: &ModelPrice) -> f64 {
-    estimate_text_tokens("default", text).tokens as f64 * price.input_price_per_1k / 1000.0
+pub fn reserve_cost(text: &str, price: &ModelPrice, settings: &RuntimeSettings) -> f64 {
+    estimate_text_tokens("default", text).tokens as f64 * price.input_price_per_1k
+        / settings.pricing_unit_tokens
 }
 
 pub fn fire_sale_discount(channel: &Channel) -> f64 {
@@ -113,20 +119,25 @@ fn is_fire_sale_at(channel: &Channel, now: DateTime<Utc>) -> bool {
             .is_some_and(|until_reset| {
                 !until_reset.is_zero()
                     && until_reset
-                    < std::time::Duration::from_secs(
-                        channel.limits.fire_sale_days_before as u64 * 24 * 60 * 60,
-                    )
+                        < std::time::Duration::from_secs(
+                            channel.limits.fire_sale_days_before as u64 * 24 * 60 * 60,
+                        )
             })
 }
 
-fn round4(value: f64) -> f64 {
-    (value * 10000.0).round() / 10000.0
+fn round_to_digits(value: f64, digits: u32) -> f64 {
+    let factor = 10_f64.powi(digits as i32);
+    (value * factor).round() / factor
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    fn test_settings() -> RuntimeSettings {
+        RuntimeSettings::from_map(&crate::settings::default_map()).unwrap()
+    }
 
     #[test]
     fn settlement_applies_all_multipliers() {
@@ -146,6 +157,7 @@ mod tests {
             0.5,
             0.2,
             0.7,
+            &test_settings(),
         );
         assert_eq!(settlement.total_points, 0.41);
         assert_eq!(settlement.provider_points, 0.287);
@@ -171,6 +183,7 @@ mod tests {
                     cache_price_per_1k: 0.0,
                 },
             ],
+            &test_settings(),
         );
         assert_eq!(price.channel_id, Some(7));
         assert_eq!(price.input_price_per_1k, 9.0);
