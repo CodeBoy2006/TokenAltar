@@ -196,3 +196,9 @@
 - **Status:** Completed
 - **Next Steps:** Add dedicated artwork for users, channels, affinity, and ledger if those tabs need page-specific backgrounds too.
 - **Context:** Source files were PNG data despite `.webp` names, so the asset extensions were corrected during the move. Unmapped tabs continue to use the generic TokenAltar background.
+
+## [2026-05-20 00:14] Visual Project Guide
+- **Changes:** Moved the user-facing relief guide image into `frontend/public/guides`, added a Guide console tab for all signed-in users, rendered the full image in a responsive framed panel, and documented the guide in `README.md`.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** The guide is content rather than a background, so it lives under `guides` and links to the original image for full-size viewing.

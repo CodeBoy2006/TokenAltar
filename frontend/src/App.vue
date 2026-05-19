@@ -32,6 +32,7 @@ type TabId =
   | 'economy'
   | 'leaderboards'
   | 'ledger'
+  | 'guide'
   | 'settings'
 
 type TabItem = [TabId, string]
@@ -293,6 +294,11 @@ const tabDetails: Record<TabId, { eyebrow: string; title: string; description: s
     title: 'Ledger entries',
     description: 'Trace usage, tokenizer decisions, and point formulas behind every settlement.',
   },
+  guide: {
+    eyebrow: 'Relief Guide',
+    title: 'Project guide',
+    description: 'A visual map of the TokenAltar flow from users and keys to routing, economy, and health.',
+  },
   settings: {
     eyebrow: 'Admin Chamber',
     title: 'Console settings',
@@ -318,6 +324,7 @@ const tabs = computed<TabItem[]>(() => {
     ['economy', 'Economy'],
     ['leaderboards', 'Leaderboards'],
     ['ledger', 'Ledger'],
+    ['guide', 'Guide'],
   ]
   if (isAdmin.value) {
     items.splice(1, 0, ['users', 'Users'])
@@ -2099,6 +2106,12 @@ onBeforeUnmount(stopConsoleEventStream)
           <div class="table-shell">
             <table><tbody><tr v-for="entry in ledger" :key="entry.id"><td>{{ entry.created_at }}</td><td>{{ entry.model }}</td><td>{{ entry.input_tokens }}/{{ entry.output_tokens }}/{{ entry.cache_tokens }}</td><td>{{ fmt(entry.total_points, 4) }}</td><td>{{ entry.tokenizer }}</td><td>{{ entry.formula_note }}</td></tr></tbody></table>
           </div>
+        </section>
+
+        <section v-if="activeTab === 'guide'" class="guide-page">
+          <a class="guide-frame" href="/guides/tokenaltar-project-guide.png" target="_blank" rel="noreferrer">
+            <img src="/guides/tokenaltar-project-guide.png" alt="TokenAltar project guide relief" />
+          </a>
         </section>
 
         <section v-if="activeTab === 'settings' && isAdmin">
