@@ -73,6 +73,7 @@ Runtime settings are managed from `/api/settings`, with the current typed view a
 Admins can configure seed balances, pricing units and fallback prices, settlement rounding, surge thresholds and multipliers, routing retry/cooldown/weight knobs, ledger/cache capacities, and console defaults for new keys and channels.
 Settings are stored in `system_settings`; request-time economy and routing values are read from the database so most changes apply without rebuilding.
 Startup-sized values such as ledger queue capacity and affinity cache capacity apply when the process starts.
+Surge pressure compares tokens settled in the last hour with the current primary quota-window capacity converted to a tokens-per-hour rate; when no healthy primary-window capacity exists, the dashboard reports `no_capacity` without applying peak pricing.
 
 ## Operational Notes
 

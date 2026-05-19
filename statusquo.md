@@ -178,3 +178,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Events carry resource topics instead of snapshots, so existing REST endpoints remain the permission boundary for owner-scoped and admin-only console data.
+
+## [2026-05-19 23:20] Surge Capacity Semantics
+- **Changes:** Changed surge pressure to compare last-hour token demand against primary quota-window capacity normalized to tokens per hour, added `no_capacity` dashboard state without peak pricing, and updated the console label/docs.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** Raw remaining quota is no longer used as the denominator for rolling one-hour demand; per-request settlement now carries the pre-reservation surge multiplier so reservation deductions do not price the same request.

@@ -415,7 +415,7 @@ const allFilteredChannelsSelected = computed(() =>
   filteredChannels.value.length > 0 && filteredChannels.value.every((channel) => selectedChannelIds.value.includes(channel.id)),
 )
 const dashboardMetrics = computed(() => [
-  { label: 'Surge', value: dashboard.value?.surge_state || 'idle', detail: `${dashboard.value?.surge_multiplier || 1}x multiplier` },
+  { label: 'Surge', value: surgeStateLabel(dashboard.value?.surge_state), detail: `${dashboard.value?.surge_multiplier || 1}x multiplier` },
   { label: 'Available tokens', value: fmt(dashboard.value?.available_tokens, 0), detail: 'ready for routing' },
   { label: 'Enabled channels', value: `${dashboard.value?.enabled_channels || 0} / ${dashboard.value?.channels || 0}`, detail: 'online capacity' },
   { label: 'Today spend', value: fmt(dashboard.value?.spent_points_today, 4), detail: 'points settled' },
@@ -1185,6 +1185,16 @@ async function refreshMe() {
 
 function fmt(value: number | undefined, digits = 2) {
   return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: digits })
+}
+
+function surgeStateLabel(value: string | undefined) {
+  const labels: Record<string, string> = {
+    idle: 'Idle',
+    normal: 'Normal',
+    peak: 'Peak',
+    no_capacity: 'No capacity',
+  }
+  return labels[value || 'idle'] || 'Idle'
 }
 
 function compactDate(value: string | null | undefined) {

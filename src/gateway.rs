@@ -9,6 +9,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -20,7 +21,10 @@ use crate::{
     db::ChannelHealthEventInput,
     error::{AppError, AppResult},
     events::{TOPIC_CHANNELS, TOPIC_DASHBOARD, publish_channel_owner_event},
-    models::{GatewayContext, GatewayReservation, LedgerEvent, ProviderKind, Usage},
+    models::{
+        Channel, ChannelQuotaWindow, GatewayContext, GatewayReservation, LedgerEvent, ProviderKind,
+        Usage,
+    },
     pricing::{fire_sale_discount, select_price, settle},
     protocol::{
         ClientProtocol, ProviderProtocol, client_response_body, extract_usage,
@@ -30,6 +34,8 @@ use crate::{
     routing::{RouteDecision, choose_channel},
     settings::RuntimeSettings,
 };
+
+const SECONDS_PER_HOUR: f64 = 60.0 * 60.0;
 
 pub async fn openai_chat_completions(
     State(state): State<AppState>,
@@ -227,6 +233,13 @@ async fn handle_gateway(
             &state.db.price_book_for_channel(decision.channel.id).await?,
             &settings,
         );
+        let attempt_surge_multiplier = surge_multiplier_from_channels(
+            &settings,
+            &channels,
+            state.metrics.tokens_last_hour(),
+            Utc::now(),
+        )
+        .0;
         let selected_reserve =
             token_estimate.tokens as f64 * price.input_price_per_1k / settings.pricing_unit_tokens;
         ensure_affordable(&auth.user, &api_key, selected_reserve)?;
@@ -335,6 +348,7 @@ async fn handle_gateway(
             request_id: request_id.clone(),
             price: price.clone(),
             reservation: reservation.clone(),
+            surge_multiplier: attempt_surge_multiplier,
             attempt_started,
         };
         match finish_response(finish, upstream).await? {
@@ -649,6 +663,7 @@ struct FinishContext {
     request_id: String,
     price: crate::models::ModelPrice,
     reservation: GatewayReservation,
+    surge_multiplier: f64,
     attempt_started: Instant,
 }
 
@@ -666,6 +681,7 @@ struct LedgerContext<'a> {
     request_id: &'a str,
     price: crate::models::ModelPrice,
     reservation: &'a GatewayReservation,
+    surge_multiplier: f64,
 }
 
 async fn finish_response(
@@ -785,6 +801,7 @@ async fn settle_success(finish: &FinishContext, usage: Usage) -> AppResult<()> {
             request_id: &finish.request_id,
             price: finish.price.clone(),
             reservation: &finish.reservation,
+            surge_multiplier: finish.surge_multiplier,
         },
         normalized_usage(&finish.request, usage),
         "success",
@@ -961,6 +978,7 @@ async fn finish_streaming_response(
                     request_id: &finish_for_stream.request_id,
                     price: finish_for_stream.price.clone(),
                     reservation: &finish_for_stream.reservation,
+                    surge_multiplier: finish_for_stream.surge_multiplier,
                 },
                 final_usage,
                 "success",
@@ -998,7 +1016,7 @@ async fn finish_streaming_response(
 
 async fn enqueue_ledger(ctx: LedgerContext<'_>, usage: Usage, status: &str) -> AppResult<()> {
     let settings = ctx.state.db.runtime_settings().await?;
-    let surge_multiplier = surge_multiplier(ctx.state).await.0;
+    let surge_multiplier = ctx.surge_multiplier;
     let discount = fire_sale_discount(&ctx.decision.channel);
     let settlement = settle(
         &usage,
@@ -1040,21 +1058,38 @@ pub async fn surge_multiplier(state: &AppState) -> (f64, &'static str) {
             .expect("built-in runtime settings defaults are valid")
     });
     let channels = state.db.list_route_channels().await.unwrap_or_default();
-    let total_available: i64 = channels
+    surge_multiplier_from_channels(
+        &settings,
+        &channels,
+        state.metrics.tokens_last_hour(),
+        Utc::now(),
+    )
+}
+
+fn surge_multiplier_from_channels(
+    settings: &RuntimeSettings,
+    channels: &[Channel],
+    tokens_last_hour: i64,
+    now: DateTime<Utc>,
+) -> (f64, &'static str) {
+    let hourly_capacity: f64 = channels
         .iter()
-        .map(|channel| {
+        .filter(|channel| channel.enabled && channel.status == "healthy")
+        .filter_map(|channel| {
             channel
                 .limits
                 .windows
                 .first()
-                .map(|window| window.limit_tokens - window.used_tokens)
-                .unwrap_or_default()
+                .and_then(|window| primary_window_remaining_tokens_per_hour(window, now))
         })
         .sum();
-    if total_available <= 0 {
-        return (settings.surge_peak_multiplier, "peak");
+    if hourly_capacity <= f64::EPSILON {
+        return (settings.surge_normal_multiplier, "no_capacity");
     }
-    let ratio = state.metrics.tokens_last_hour() as f64 / total_available as f64;
+
+    // Compare one-hour demand to a one-hour supply rate. Raw remaining inventory is not a
+    // time-compatible denominator for the rolling one-hour token window.
+    let ratio = tokens_last_hour as f64 / hourly_capacity;
     if ratio < settings.surge_low_threshold {
         (settings.surge_idle_multiplier, "idle")
     } else if ratio > settings.surge_high_threshold {
@@ -1062,6 +1097,24 @@ pub async fn surge_multiplier(state: &AppState) -> (f64, &'static str) {
     } else {
         (settings.surge_normal_multiplier, "normal")
     }
+}
+
+fn primary_window_remaining_tokens_per_hour(
+    window: &ChannelQuotaWindow,
+    now: DateTime<Utc>,
+) -> Option<f64> {
+    let remaining_tokens = window.limit_tokens - window.used_tokens;
+    if remaining_tokens <= 0 {
+        return None;
+    }
+    let end_at = DateTime::parse_from_rfc3339(&window.current_window_end_at)
+        .ok()?
+        .with_timezone(&Utc);
+    let remaining_seconds = end_at.signed_duration_since(now).num_seconds();
+    if remaining_seconds <= 0 {
+        return None;
+    }
+    Some(remaining_tokens as f64 * SECONDS_PER_HOUR / remaining_seconds as f64)
 }
 
 fn normalized_usage(request: &crate::protocol::TextRequest, usage: Usage) -> Usage {
@@ -1092,6 +1145,82 @@ fn merge_usage_from_sse(bytes: &Bytes, usage: &mut Usage) {
                 *usage = parsed;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration as ChronoDuration, TimeZone};
+
+    use super::*;
+
+    fn default_settings() -> RuntimeSettings {
+        RuntimeSettings::from_map(&crate::settings::default_map())
+            .expect("built-in runtime settings defaults are valid")
+    }
+
+    fn healthy_channel_with_primary_window(
+        remaining_tokens: i64,
+        window_seconds_left: i64,
+    ) -> Channel {
+        let now = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
+        Channel {
+            id: 1,
+            owner_user_id: 1,
+            name: "primary".to_string(),
+            provider: ProviderKind::OpenAi,
+            base_url: "http://example.test".to_string(),
+            api_key_secret: "secret".to_string(),
+            models: vec!["*".to_string()],
+            enabled: true,
+            status: "healthy".to_string(),
+            health_checked_at: None,
+            upstream_latency_ms: None,
+            last_error: None,
+            limits: crate::models::ChannelLimits {
+                windows: vec![ChannelQuotaWindow {
+                    id: 1,
+                    name: "Minute".to_string(),
+                    limit_tokens: 1_000,
+                    used_tokens: 1_000 - remaining_tokens,
+                    period_unit: "minute".to_string(),
+                    period_count: 1,
+                    anchor_at: "2026-05-19T12:00:00Z".to_string(),
+                    timezone: "UTC".to_string(),
+                    current_window_start_at: now.to_rfc3339(),
+                    current_window_end_at: (now + ChronoDuration::seconds(window_seconds_left))
+                        .to_rfc3339(),
+                    sort_order: 0,
+                }],
+                fire_sale_days_before: 3,
+                fire_sale_remaining_pct: 0.25,
+                fire_sale_discount: 0.2,
+                provider_share: 0.7,
+            },
+        }
+    }
+
+    #[test]
+    fn surge_uses_hourly_capacity_not_raw_remaining_inventory() {
+        let settings = default_settings();
+        let now = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
+        let channel = healthy_channel_with_primary_window(10, 60);
+
+        let (multiplier, state) = surge_multiplier_from_channels(&settings, &[channel], 100, now);
+
+        assert_eq!(state, "idle");
+        assert_eq!(multiplier, settings.surge_idle_multiplier);
+    }
+
+    #[test]
+    fn surge_reports_no_capacity_without_peak_pricing() {
+        let settings = default_settings();
+        let now = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
+
+        let (multiplier, state) = surge_multiplier_from_channels(&settings, &[], 0, now);
+
+        assert_eq!(state, "no_capacity");
+        assert_eq!(multiplier, settings.surge_normal_multiplier);
     }
 }
 
