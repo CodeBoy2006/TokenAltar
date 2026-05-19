@@ -557,9 +557,7 @@ caption {
 }
 
 .hero-kicker span,
-.page-header span,
-.card-heading span,
-.auth-card-topline span {
+.page-header span {
   color: var(--gold-bright);
   font-size: 0.78rem;
   font-weight: 900;
@@ -596,16 +594,24 @@ caption {
   z-index: 3;
   justify-self: stretch;
   display: grid;
-  gap: 16px;
+  gap: 18px;
   width: 100%;
-  padding: 22px;
+  max-width: 390px;
+  padding: 24px;
   border-color: rgba(225, 189, 115, 0.32);
   background:
-    linear-gradient(180deg, rgba(30, 22, 16, 0.82), rgba(12, 10, 9, 0.9)),
-    rgba(18, 13, 10, 0.82);
+    linear-gradient(180deg, rgba(30, 22, 16, 0.76), rgba(12, 10, 9, 0.92)),
+    rgba(18, 13, 10, 0.8);
   box-shadow: 0 24px 48px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 244, 213, 0.1);
   color: #fff4d6;
   backdrop-filter: blur(18px);
+}
+
+.auth-card-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
 }
 
 .auth-card label {
@@ -614,6 +620,8 @@ caption {
 
 .auth-card h3 {
   color: #fff4d6;
+  font-size: 2rem;
+  line-height: 1;
 }
 
 .auth-card input {
@@ -623,37 +631,19 @@ caption {
     #fff8ea;
 }
 
-.auth-card > button {
+.auth-form {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-form button {
+  width: 100%;
   min-height: 44px;
+  margin-top: 4px;
   border-color: rgba(238, 196, 115, 0.58);
   background: linear-gradient(180deg, #d59b43, #7b4722);
   color: #1d1209;
   text-shadow: 0 1px rgba(255, 240, 197, 0.48);
-}
-
-.auth-card-topline {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 2px;
-}
-
-.auth-card-topline strong {
-  min-width: 58px;
-  border: 1px solid rgba(225, 189, 115, 0.28);
-  border-radius: 999px;
-  padding: 5px 10px;
-  color: rgba(255, 242, 213, 0.86);
-  font-size: 0.74rem;
-  text-align: center;
-  text-transform: uppercase;
-}
-
-.card-heading {
-  display: grid;
-  gap: 3px;
-  padding-top: 2px;
 }
 
 .segmented {
@@ -684,12 +674,19 @@ caption {
 }
 
 .auth-card .segmented button {
+  min-height: 34px;
+  padding: 0 12px;
   color: rgba(255, 236, 199, 0.72);
+  font-size: 0.8rem;
 }
 
 .auth-card .segmented button.active {
   background: linear-gradient(180deg, rgba(255, 231, 176, 0.24), rgba(214, 150, 61, 0.18));
   color: #fff4d6;
+}
+
+.auth-mode {
+  min-width: 150px;
 }
 
 .segmented.small {
@@ -2202,6 +2199,16 @@ button.danger:hover:not(:disabled) {
 
   .auth-panel {
     padding: 12px;
+  }
+
+  .auth-card-header {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .auth-mode {
+    width: 100%;
+    min-width: 0;
   }
 
   .hero-kicker {

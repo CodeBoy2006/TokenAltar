@@ -184,3 +184,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Raw remaining quota is no longer used as the denominator for rolling one-hour demand; per-request settlement now carries the pre-reservation surge multiplier so reservation deductions do not price the same request.
+
+## [2026-05-19 23:39] Auth Card Simplification
+- **Changes:** Removed redundant logged-out auth card labels, collapsed login/register into a compact header mode switch, converted auth actions to standard forms, and tightened desktop/mobile card spacing.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** Verified with `pnpm --dir frontend build` and Playwright desktop/mobile screenshots for login and mobile register states; no API behavior changed.

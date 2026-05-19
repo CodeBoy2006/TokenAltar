@@ -1470,33 +1470,28 @@ onBeforeUnmount(stopConsoleEventStream)
             <h2>Token<wbr />Altar</h2>
           </div>
           <div class="auth-card">
-            <div class="auth-card-topline">
-              <span>Secure Steward Entry</span>
-              <strong>{{ authMode === 'login' ? 'Access' : 'Invite' }}</strong>
-            </div>
-            <div class="segmented">
-              <button :class="{ active: authMode === 'login' }" @click="authMode = 'login'">Login</button>
-              <button :class="{ active: authMode === 'register' }" @click="authMode = 'register'">Register</button>
+            <div class="auth-card-header">
+              <h3>{{ authMode === 'login' ? 'Sign in' : 'Create account' }}</h3>
+              <div class="segmented auth-mode" aria-label="Authentication mode">
+                <button type="button" :class="{ active: authMode === 'login' }" @click="authMode = 'login'">Login</button>
+                <button type="button" :class="{ active: authMode === 'register' }" @click="authMode = 'register'">Register</button>
+              </div>
             </div>
             <template v-if="authMode === 'login'">
-              <div class="card-heading">
-                <span>Console Access</span>
-                <h3>Sign in</h3>
-              </div>
-              <label>Email <input v-model="loginForm.email" autocomplete="username" /></label>
-              <label>Password <input v-model="loginForm.password" type="password" autocomplete="current-password" /></label>
-              <button @click="login">Enter console</button>
+              <form class="auth-form" @submit.prevent="login">
+                <label>Email <input v-model="loginForm.email" autocomplete="username" /></label>
+                <label>Password <input v-model="loginForm.password" type="password" autocomplete="current-password" /></label>
+                <button type="submit">Enter console</button>
+              </form>
             </template>
             <template v-else>
-              <div class="card-heading">
-                <span>New Steward</span>
-                <h3>Create account</h3>
-              </div>
-              <label>Email <input v-model="registerForm.email" /></label>
-              <label>Name <input v-model="registerForm.display_name" /></label>
-              <label>Password <input v-model="registerForm.password" type="password" /></label>
-              <label>Invite Code <input v-model="registerForm.invite_code" /></label>
-              <button @click="register">Register</button>
+              <form class="auth-form" @submit.prevent="register">
+                <label>Email <input v-model="registerForm.email" autocomplete="username" /></label>
+                <label>Name <input v-model="registerForm.display_name" autocomplete="name" /></label>
+                <label>Password <input v-model="registerForm.password" type="password" autocomplete="new-password" /></label>
+                <label>Invite code <input v-model="registerForm.invite_code" autocomplete="off" /></label>
+                <button type="submit">Create account</button>
+              </form>
             </template>
           </div>
         </div>
