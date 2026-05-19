@@ -166,3 +166,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** The page reuses `/api/channels` and the existing passive `health_windows` payload, so no new active probing or backend route was added.
+
+## [2026-05-19 22:35] Economy History UI Polish
+- **Changes:** Replaced the economy tab's transfer and red-packet history tables with compact responsive cards, empty states, signed transfer amounts, packet progress bars, and mobile-first stacking.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** Verified with `pnpm --dir frontend build`, `cargo test`, `git diff --check`, and Playwright desktop/mobile screenshots against a temporary local backend.

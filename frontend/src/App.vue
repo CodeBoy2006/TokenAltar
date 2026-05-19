@@ -1030,6 +1030,34 @@ function fmt(value: number | undefined, digits = 2) {
   return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: digits })
 }
 
+function compactDate(value: string | null | undefined) {
+  if (!value) return 'now'
+  const normalized = value.includes('T') ? value : value.replace(' ', 'T')
+  const date = new Date(normalized.endsWith('Z') ? normalized : `${normalized}Z`)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function transferDirection(item: any) {
+  return item.to_user_id === user.value?.id ? 'In' : 'Out'
+}
+
+function signedTransferPoints(item: any) {
+  const sign = item.to_user_id === user.value?.id ? '+' : '-'
+  return `${sign}${fmt(item.points, 4)}`
+}
+
+function packetClaimedPct(packet: any) {
+  const total = Number(packet.total_parts || 0)
+  if (total <= 0) return 0
+  return Math.min(100, Math.max(0, Math.round((Number(packet.claimed_parts || 0) / total) * 100)))
+}
+
 function formatTtft(value: number | null | undefined) {
   return value === null || value === undefined ? 'n/a' : `${fmt(value, 0)}ms`
 }
@@ -1734,9 +1762,77 @@ onMounted(refreshAll)
               <button class="ghost" @click="toggleAnonymous">Toggle</button>
             </article>
           </div>
-          <div class="table-pair">
-            <div class="table-shell"><table><caption>Transfers</caption><tbody><tr v-for="item in transfers" :key="item.id"><td>{{ item.from_name }} -> {{ item.to_name }}</td><td>{{ fmt(item.points, 4) }}</td><td>{{ item.memo }}</td></tr></tbody></table></div>
-            <div class="table-shell"><table><caption>My Red Packets</caption><tbody><tr v-for="packet in redPackets" :key="packet.id"><td>{{ packet.phrase }}</td><td>{{ packet.mode }}</td><td>{{ packet.claimed_parts }}/{{ packet.total_parts }}</td><td>{{ fmt(packet.remaining_points, 4) }}</td></tr></tbody></table></div>
+          <div class="economy-history">
+            <article class="panel history-panel">
+              <header class="history-head">
+                <div>
+                  <span>Recent flows</span>
+                  <h3>Transfers</h3>
+                </div>
+                <strong>{{ transfers.length }}</strong>
+              </header>
+              <div v-if="transfers.length" class="history-list">
+                <article
+                  v-for="item in transfers"
+                  :key="item.id"
+                  class="history-row transfer-row"
+                  :class="{ incoming: item.to_user_id === user.id, outgoing: item.to_user_id !== user.id }"
+                >
+                  <div class="history-main">
+                    <span class="direction-pill">{{ transferDirection(item) }}</span>
+                    <strong>{{ item.from_name }} <span aria-hidden="true">-&gt;</span> {{ item.to_name }}</strong>
+                    <small>{{ item.memo || 'No memo' }}</small>
+                  </div>
+                  <div class="history-meta">
+                    <strong>{{ signedTransferPoints(item) }}</strong>
+                    <small>{{ compactDate(item.created_at) }}</small>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="history-empty">
+                <strong>No transfers</strong>
+                <span>Recent point movements will appear here.</span>
+              </div>
+            </article>
+
+            <article class="panel history-panel">
+              <header class="history-head">
+                <div>
+                  <span>Phrase packets</span>
+                  <h3>My Red Packets</h3>
+                </div>
+                <strong>{{ redPackets.length }}</strong>
+              </header>
+              <div v-if="redPackets.length" class="packet-list">
+                <article v-for="packet in redPackets" :key="packet.id" class="packet-card">
+                  <div class="packet-title">
+                    <strong>{{ packet.phrase }}</strong>
+                    <span class="mode-chip">{{ packet.mode }}</span>
+                  </div>
+                  <div class="packet-progress" :aria-label="`${packetClaimedPct(packet)}% claimed`">
+                    <span :style="{ width: `${packetClaimedPct(packet)}%` }"></span>
+                  </div>
+                  <div class="packet-stats">
+                    <span>
+                      <b>{{ packet.claimed_parts }}/{{ packet.total_parts }}</b>
+                      <small>claimed</small>
+                    </span>
+                    <span>
+                      <b>{{ fmt(packet.remaining_points, 4) }}</b>
+                      <small>remaining</small>
+                    </span>
+                    <span>
+                      <b>{{ compactDate(packet.created_at) }}</b>
+                      <small>created</small>
+                    </span>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="history-empty">
+                <strong>No packets</strong>
+                <span>Created red packets will appear here.</span>
+              </div>
+            </article>
           </div>
         </section>
 
