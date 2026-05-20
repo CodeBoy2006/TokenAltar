@@ -519,6 +519,7 @@ fn response_to_chat_completions(
     usage: Usage,
 ) -> (Value, Usage) {
     let text = output_text(&value, provider_protocol);
+    let prompt_tokens = usage.input_tokens + usage.cache_tokens;
     (
         json!({
             "id": value.get("id").cloned().unwrap_or_else(|| json!("chatcmpl_local")),
@@ -530,9 +531,12 @@ fn response_to_chat_completions(
                 "finish_reason": finish_reason(&value, provider_protocol)
             }],
             "usage": {
-                "prompt_tokens": usage.input_tokens,
+                "prompt_tokens": prompt_tokens,
                 "completion_tokens": usage.output_tokens,
-                "total_tokens": usage.total()
+                "total_tokens": usage.total(),
+                "prompt_tokens_details": {
+                    "cached_tokens": usage.cache_tokens
+                }
             }
         }),
         usage,
@@ -545,6 +549,7 @@ fn response_to_openai_responses(
     usage: Usage,
 ) -> (Value, Usage) {
     let text = output_text(&value, provider_protocol);
+    let input_tokens = usage.input_tokens + usage.cache_tokens;
     (
         json!({
             "id": value.get("id").cloned().unwrap_or_else(|| json!("resp_local")),
@@ -556,9 +561,12 @@ fn response_to_openai_responses(
                 "content": [{"type": "output_text", "text": text}]
             }],
             "usage": {
-                "input_tokens": usage.input_tokens,
+                "input_tokens": input_tokens,
                 "output_tokens": usage.output_tokens,
-                "total_tokens": usage.total()
+                "total_tokens": usage.total(),
+                "input_tokens_details": {
+                    "cached_tokens": usage.cache_tokens
+                }
             }
         }),
         usage,
@@ -593,6 +601,7 @@ fn response_to_gemini(
     provider_protocol: ProviderProtocol,
     usage: Usage,
 ) -> (Value, Usage) {
+    let prompt_tokens = usage.input_tokens + usage.cache_tokens;
     (
         json!({
             "candidates": [{
@@ -603,9 +612,10 @@ fn response_to_gemini(
                 "finishReason": "STOP"
             }],
             "usageMetadata": {
-                "promptTokenCount": usage.input_tokens,
+                "promptTokenCount": prompt_tokens,
                 "candidatesTokenCount": usage.output_tokens,
-                "totalTokenCount": usage.total()
+                "totalTokenCount": usage.total(),
+                "cachedContentTokenCount": usage.cache_tokens
             }
         }),
         usage,
@@ -613,34 +623,85 @@ fn response_to_gemini(
 }
 
 pub fn extract_usage(value: &Value) -> Usage {
-    let usage = value.get("usage").unwrap_or(value);
-    let input_tokens = usage
-        .get("input_tokens")
-        .or_else(|| usage.get("prompt_tokens"))
-        .or_else(|| usage.get("promptTokenCount"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let output_tokens = usage
-        .get("output_tokens")
-        .or_else(|| usage.get("completion_tokens"))
-        .or_else(|| usage.get("candidatesTokenCount"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let cache_tokens = usage
-        .get("cache_read_input_tokens")
-        .or_else(|| usage.get("cache_creation_input_tokens"))
-        .or_else(|| usage.get("cached_tokens"))
-        .or_else(|| usage.get("cachedContentTokenCount"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
     if value.get("usageMetadata").is_some() {
-        return extract_usage(value.get("usageMetadata").unwrap_or(value));
+        return parse_usage_fields(
+            value.get("usageMetadata").unwrap_or(value),
+            CacheTokenShape::IncludedInInput,
+        );
     }
+    if let Some(response_usage) = value
+        .get("response")
+        .and_then(|response| response.get("usage"))
+    {
+        return parse_usage_fields(response_usage, CacheTokenShape::Auto);
+    }
+    if let Some(message_usage) = value
+        .get("message")
+        .and_then(|message| message.get("usage"))
+    {
+        return parse_usage_fields(message_usage, CacheTokenShape::Auto);
+    }
+    if let Some(usage) = value.get("usage") {
+        return parse_usage_fields(usage, CacheTokenShape::Auto);
+    }
+    parse_usage_fields(value, CacheTokenShape::Auto)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CacheTokenShape {
+    Auto,
+    IncludedInInput,
+}
+
+fn parse_usage_fields(usage: &Value, cache_shape: CacheTokenShape) -> Usage {
+    let raw_input_tokens = token_field(
+        usage,
+        &["input_tokens", "prompt_tokens", "promptTokenCount"],
+    );
+    let output_tokens = token_field(
+        usage,
+        &["output_tokens", "completion_tokens", "candidatesTokenCount"],
+    );
+    let detail_cache_tokens = usage
+        .get("input_tokens_details")
+        .or_else(|| usage.get("prompt_tokens_details"))
+        .map(|details| token_field(details, &["cached_tokens"]))
+        .unwrap_or(0);
+    let direct_cache_tokens = token_field(
+        usage,
+        &[
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "cached_tokens",
+            "cachedContentTokenCount",
+        ],
+    );
+    let cache_tokens = detail_cache_tokens.max(direct_cache_tokens);
+    let cache_included_in_input = detail_cache_tokens > 0
+        || matches!(cache_shape, CacheTokenShape::IncludedInInput)
+        || usage.get("cachedContentTokenCount").is_some();
+    let input_tokens = if cache_included_in_input {
+        raw_input_tokens.saturating_sub(cache_tokens)
+    } else {
+        raw_input_tokens
+    };
     Usage {
         input_tokens,
         output_tokens,
         cache_tokens,
     }
+}
+
+fn token_field(value: &Value, keys: &[&str]) -> i64 {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|tokens| i64::try_from(tokens).ok()))
+        })
+        .unwrap_or(0)
+        .max(0)
 }
 
 pub fn translate_stream_chunk(
@@ -1604,6 +1665,57 @@ mod tests {
     }
 
     #[test]
+    fn extracts_openai_cached_input_details_without_double_counting() {
+        let usage = extract_usage(&json!({
+            "usage": {
+                "input_tokens": 120,
+                "input_tokens_details": {"cached_tokens": 40},
+                "output_tokens": 7
+            }
+        }));
+
+        assert_eq!(usage.input_tokens, 80);
+        assert_eq!(usage.cache_tokens, 40);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.total(), 127);
+    }
+
+    #[test]
+    fn extracts_chat_prompt_cache_details_without_double_counting() {
+        let usage = extract_usage(&json!({
+            "usage": {
+                "prompt_tokens": 90,
+                "prompt_tokens_details": {"cached_tokens": 35},
+                "completion_tokens": 11
+            }
+        }));
+
+        assert_eq!(usage.input_tokens, 55);
+        assert_eq!(usage.cache_tokens, 35);
+        assert_eq!(usage.output_tokens, 11);
+        assert_eq!(usage.total(), 101);
+    }
+
+    #[test]
+    fn extracts_usage_nested_in_response_completed_event() {
+        let usage = extract_usage(&json!({
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": 200,
+                    "input_tokens_details": {"cached_tokens": 125},
+                    "output_tokens": 25
+                }
+            }
+        }));
+
+        assert_eq!(usage.input_tokens, 75);
+        assert_eq!(usage.cache_tokens, 125);
+        assert_eq!(usage.output_tokens, 25);
+        assert_eq!(usage.total(), 225);
+    }
+
+    #[test]
     fn converts_openai_text_request_to_gemini() {
         let request = parse_client_request(
             ClientProtocol::OpenAiChatCompletions,
@@ -1768,7 +1880,7 @@ mod tests {
                 "cachedContentTokenCount": 2
             }
         }));
-        assert_eq!(usage.input_tokens, 7);
+        assert_eq!(usage.input_tokens, 5);
         assert_eq!(usage.output_tokens, 3);
         assert_eq!(usage.cache_tokens, 2);
     }

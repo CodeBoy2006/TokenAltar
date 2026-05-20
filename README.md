@@ -110,7 +110,7 @@ Prices are stored per **1M tokens** and split into input, output, and cache-toke
 4. global `default`
 5. runtime fallback rates from Settings
 
-Settlement applies the selected tariff, surge multiplier, fire-sale discount, admin-configured global provider share, and configured rounding. Ledger entries keep the final point amount and a readable formula note.
+Settlement applies the selected tariff, surge multiplier, fire-sale discount, admin-configured global provider share, and configured rounding. Ledger entries keep the final point amount and a readable formula note. When an upstream reports cached prompt/input tokens inside usage details, TokenAltar splits those tokens out of normal input usage so cached tokens are charged once at the cache rate rather than double-counted.
 
 Built-in global presets currently cover GPT-5.5, GPT-5.4, GPT-5.3-codex, GPT-5.2, GPT-5.2-codex, Claude Opus 4.7/4.6/4.5/4.1/4, Claude Sonnet 4.6/4.5/4, and Claude Haiku 4.5. The single cache price field represents cached-input/cache-hit pricing.
 

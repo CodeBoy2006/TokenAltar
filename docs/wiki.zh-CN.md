@@ -868,6 +868,8 @@ TokenAltar 当前固定使用：
 
 如果最终结算和预留不同，系统会对用户余额、Key 已消费、通道已用点数做差额调整。
 
+如果上游在 usage details 中报告 cached prompt/input tokens，TokenAltar 会先把这部分从普通输入 token 中拆出，再按 cache 价格单独结算，避免同一批缓存命中 token 同时按 input 和 cache 重复收费。
+
 ### 提供者奖励
 
 提供者奖励使用全局 Provider Payout Multiplier：
@@ -1435,4 +1437,3 @@ docker compose up -d --build
 - 升级前备份 SQLite。
 - Docker 部署不要删除 `tokenaltar-data` 卷。
 - 上游 API Key 泄露后立即更新通道密钥，并旋转相关本地 API Key。
-

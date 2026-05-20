@@ -1169,7 +1169,7 @@ fn merge_usage_from_sse(bytes: &Bytes, usage: &mut Usage) {
         }
         if let Ok(value) = serde_json::from_str::<Value>(data) {
             let parsed = extract_usage(&value);
-            if parsed.input_tokens > 0 || parsed.output_tokens > 0 || parsed.cache_tokens > 0 {
+            if parsed.total() > 0 {
                 *usage = parsed;
             }
         }

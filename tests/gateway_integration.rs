@@ -168,6 +168,63 @@ async fn openai_responses_gateway_settles_ledger_and_limits() {
 }
 
 #[tokio::test]
+async fn openai_responses_gateway_splits_cached_input_tokens() {
+    let upstream = spawn_upstream(json!({
+        "id": "resp_cached",
+        "model": "gpt-special",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "cached ok"}]}],
+        "usage": {
+            "input_tokens": 120,
+            "input_tokens_details": {"cached_tokens": 40},
+            "output_tokens": 10
+        }
+    }))
+    .await;
+    let (state, token) = setup_state(upstream).await;
+    state
+        .db
+        .upsert_price(&ModelPrice {
+            channel_id: Some(1),
+            model_pattern: "gpt-special".to_string(),
+            input_price_per_1m: 10_000.0,
+            output_price_per_1m: 20_000.0,
+            cache_price_per_1m: 1_000.0,
+        })
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({
+                        "model": "gpt-special",
+                        "input": "hello",
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let ledger = state.db.list_ledger(None).await.unwrap();
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0]["input_tokens"], 80);
+    assert_eq!(ledger[0]["cache_tokens"], 40);
+    assert_eq!(ledger[0]["output_tokens"], 10);
+    assert_eq!(ledger[0]["total_points"], 0.52);
+}
+
+#[tokio::test]
 async fn anthropic_messages_gateway_converts_response_shape() {
     let upstream = spawn_upstream(json!({
         "id": "resp_test",
@@ -940,6 +997,39 @@ async fn semantic_empty_stream_retries_backup_before_client_done() {
         state.db.get_channel(1).await.unwrap().limits.windows[0].used_points,
         0.0
     );
+}
+
+#[tokio::test]
+async fn responses_stream_settles_usage_from_completed_event() {
+    let stream = spawn_stream_upstream(&[
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"stream ok\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":50,\"input_tokens_details\":{\"cached_tokens\":20},\"output_tokens\":6}}}\n\n",
+        "data: [DONE]\n\n",
+    ])
+    .await;
+    let (state, token) = setup_state(stream).await;
+    let app = build_router(state.clone());
+
+    let response = app
+        .oneshot(stream_retry_request(&token, "alpha"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8(body.to_vec())
+            .unwrap()
+            .contains("stream ok")
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let ledger = state.db.list_ledger(None).await.unwrap();
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0]["input_tokens"], 30);
+    assert_eq!(ledger[0]["cache_tokens"], 20);
+    assert_eq!(ledger[0]["output_tokens"], 6);
 }
 
 #[tokio::test]

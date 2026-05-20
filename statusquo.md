@@ -298,3 +298,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** The transactional reservation check remains the final concurrent safety guard; routing now avoids picking known-underfilled candidates before that transaction.
+
+## [2026-05-20 21:37] Usage Cache Settlement Fix
+- **Changes:** Updated usage normalization to read nested OpenAI Responses/Chat usage details, split cached input tokens out of regular input billing, and capture Responses streaming `response.completed.response.usage` before settlement. Added gateway/protocol regressions and documented the cache-token billing semantics.
+- **Status:** Completed
+- **Next Steps:** Monitor real streaming ledger entries to confirm upstreams consistently emit terminal usage; add provider-specific fixtures if another upstream shape appears.
+- **Context:** `Usage.input_tokens` now represents uncached input tokens for billing, while `Usage.cache_tokens` represents cached input tokens charged once at the cache rate.
