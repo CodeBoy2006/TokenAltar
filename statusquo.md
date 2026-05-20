@@ -304,3 +304,9 @@
 - **Status:** Completed
 - **Next Steps:** Monitor real streaming ledger entries to confirm upstreams consistently emit terminal usage; add provider-specific fixtures if another upstream shape appears.
 - **Context:** `Usage.input_tokens` now represents uncached input tokens for billing, while `Usage.cache_tokens` represents cached input tokens charged once at the cache rate.
+
+## [2026-05-20 21:47] Fire Sale Weighted Routing
+- **Changes:** Removed the hard fire-sale candidate priority from `choose_channel`, kept fire-sale as a configurable route-weight multiplier inside the shared healthy-channel pool, and updated README/wiki routing wording plus regression coverage.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** Affinity still runs before weighted selection; fire-sale now biases probability without excluding regular channels from the same routing draw.

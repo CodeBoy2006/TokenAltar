@@ -905,8 +905,8 @@ provider_points = total_points * Provider Payout Multiplier
 7. 过滤模型不匹配的通道。
 8. 过滤点数窗口不足的通道。
 9. 应用亲和绑定。
-10. 优先考虑 fire-sale 候选。
-11. 按 primary window 剩余点数加权选择通道。
+10. 将 fire-sale 倍率并入通道权重。
+11. 在同一候选池里按 primary window 剩余点数加权选择通道。
 
 ### 自动重试
 

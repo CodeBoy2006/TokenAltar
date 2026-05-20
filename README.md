@@ -84,7 +84,7 @@ Files, embeddings, rerank, realtime, audio, and other non-text extensions are in
 
 ## Routing And Reliability
 
-Routing starts from the local API key. A request can only use channels allowed by that key, then must pass model coverage, enabled/status checks, quota-window checks, cooldown checks, and affinity policy.
+Routing starts from the local API key. A request can only use channels allowed by that key, then must pass model coverage, enabled/status checks, quota-window checks, cooldown checks, and affinity policy. Fire-sale channels stay in the same weighted selection pool as regular channels; their route weight is multiplied by the configured fire-sale factor instead of becoming a hard priority lane.
 
 Retryable upstream failures release local reservations and can fall back to another healthy channel before semantic content reaches the client. Retryable cases include connection errors, `408`, `429`, `5xx`, and semantic-empty replies. For streams, heartbeat/comment frames, usage-only metadata, whitespace-only deltas, and terminal markers do not count as semantic content; once real text or tool-call semantics have been forwarded, the gateway does not interrupt or replay that stream.
 

@@ -78,16 +78,8 @@ pub async fn choose_channel(
         }
     }
 
-    if let Some(channel) = weighted_choice(&healthy, true, fire_sale_weight_multiplier) {
-        return Ok(RouteDecision {
-            fire_sale: is_fire_sale(&channel),
-            channel,
-            affinity_hit,
-        });
-    }
-
     let channel =
-        weighted_choice(&healthy, false, fire_sale_weight_multiplier).expect("healthy not empty");
+        weighted_choice(&healthy, fire_sale_weight_multiplier).expect("healthy not empty");
     Ok(RouteDecision {
         fire_sale: is_fire_sale(&channel),
         channel,
@@ -131,16 +123,8 @@ fn has_quota_for_estimate(channel: &Channel, required_points: f64) -> bool {
         })
 }
 
-fn weighted_choice(
-    channels: &[&Channel],
-    fire_sale_only: bool,
-    fire_sale_weight_multiplier: f64,
-) -> Option<Channel> {
-    let candidates = channels
-        .iter()
-        .copied()
-        .filter(|channel| !fire_sale_only || is_fire_sale(channel))
-        .collect::<Vec<_>>();
+fn weighted_choice(channels: &[&Channel], fire_sale_weight_multiplier: f64) -> Option<Channel> {
+    let candidates = channels.to_vec();
     if candidates.is_empty() {
         return None;
     }
@@ -177,6 +161,8 @@ fn model_matches(pattern: &str, model: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{Duration as ChronoDuration, Utc};
+
     use crate::models::{ChannelLimits, ChannelQuotaWindow, ProviderKind};
 
     use super::*;
@@ -268,6 +254,50 @@ mod tests {
         assert_eq!(decision.channel.id, 2);
     }
 
+    #[tokio::test]
+    async fn does_not_force_fire_sale_over_higher_weight_regular_channel() {
+        let runtime = RuntimeRouterState::default();
+        let channels = vec![
+            Channel {
+                id: 1,
+                owner_user_id: 1,
+                name: "regular-large".to_string(),
+                provider: ProviderKind::OpenAi,
+                base_url: "http://example.test".to_string(),
+                api_key_secret: "x".to_string(),
+                models: vec!["*".to_string()],
+                enabled: true,
+                status: "healthy".to_string(),
+                health_checked_at: None,
+                upstream_latency_ms: None,
+                last_error: None,
+                limits: non_fire_sale_limits(100.0),
+            },
+            Channel {
+                id: 2,
+                owner_user_id: 1,
+                name: "fire-sale-tiny".to_string(),
+                provider: ProviderKind::OpenAi,
+                base_url: "http://example.test".to_string(),
+                api_key_secret: "x".to_string(),
+                models: vec!["*".to_string()],
+                enabled: true,
+                status: "healthy".to_string(),
+                health_checked_at: None,
+                upstream_latency_ms: None,
+                last_error: None,
+                limits: fire_sale_limits(0.01),
+            },
+        ];
+        let required_points = HashMap::from([(1, 0.001), (2, 0.001)]);
+
+        let decision = choose_channel(&channels, "gpt-test", None, &required_points, &runtime, 0.0)
+            .await
+            .unwrap();
+
+        assert_eq!(decision.channel.id, 1);
+    }
+
     fn limits(remaining: f64) -> ChannelLimits {
         ChannelLimits {
             windows: vec![ChannelQuotaWindow {
@@ -287,5 +317,18 @@ mod tests {
             fire_sale_remaining_pct: 0.25,
             fire_sale_discount: 0.2,
         }
+    }
+
+    fn non_fire_sale_limits(remaining: f64) -> ChannelLimits {
+        let mut limits = limits(remaining);
+        limits.fire_sale_days_before = 0;
+        limits
+    }
+
+    fn fire_sale_limits(remaining: f64) -> ChannelLimits {
+        let mut limits = limits(remaining);
+        limits.windows[0].current_window_end_at =
+            (Utc::now() + ChronoDuration::days(1)).to_rfc3339();
+        limits
     }
 }
