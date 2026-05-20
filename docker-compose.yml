@@ -1,0 +1,19 @@
+services:
+  tokenaltar:
+    image: ghcr.io/codeboy2006/tokenaltar:latest
+    build:
+      context: .
+    ports:
+      - "8080:8080"
+    environment:
+      TOKENALTAR_BIND: 0.0.0.0:8080
+      TOKENALTAR_DATABASE_URL: sqlite:///data/tokenaltar.sqlite3
+      TOKENALTAR_ADMIN_EMAIL: ${TOKENALTAR_ADMIN_EMAIL:?set TOKENALTAR_ADMIN_EMAIL in .env}
+      TOKENALTAR_ADMIN_PASSWORD: ${TOKENALTAR_ADMIN_PASSWORD:?set TOKENALTAR_ADMIN_PASSWORD in .env}
+      TOKENALTAR_LEADERBOARD_TIMEZONE: ${TOKENALTAR_LEADERBOARD_TIMEZONE:-Asia/Shanghai}
+    volumes:
+      - tokenaltar-data:/data
+    restart: unless-stopped
+
+volumes:
+  tokenaltar-data:

@@ -153,6 +153,27 @@ The server listens on `127.0.0.1:8080` by default and stores data in `tokenaltar
 
 Run `pnpm --dir frontend build` before compiling or releasing Rust whenever the console changes. Built assets are embedded into the Rust binary, so runtime deployment does not need a `frontend/dist` directory.
 
+## Docker Deployment
+
+Build and run locally with Docker Compose:
+
+```bash
+cp .env.example .env
+$EDITOR .env
+docker compose up -d --build
+```
+
+The compose service publishes TokenAltar on `http://localhost:8080`, binds the application to `0.0.0.0:8080` inside the container, and persists SQLite data in the `tokenaltar-data` volume at `/data/tokenaltar.sqlite3`.
+
+To pull the image built by GitHub Actions instead of building locally:
+
+```bash
+docker pull ghcr.io/codeboy2006/tokenaltar:latest
+docker compose up -d
+```
+
+The image build is automated by `.github/workflows/docker-image.yml`. Pushes to `main`, tags matching `v*`, and manual workflow runs publish to GitHub Container Registry with branch, tag, semantic-version, SHA, and default-branch `latest` tags. The workflow uses the repository `GITHUB_TOKEN`; ensure GitHub Actions has package write permission in the repository settings if GHCR publishing is blocked.
+
 ## Configuration
 
 Environment variables:

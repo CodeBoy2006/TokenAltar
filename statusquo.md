@@ -262,3 +262,9 @@
 - **Status:** Completed
 - **Next Steps:** Rebuild/deploy the embedded frontend bundle so the channel form no longer exposes provider-share controls.
 - **Context:** Backward-compatible JSON submissions with `provider_share` are ignored by Serde; regression tests cover ignored channel updates and global-share settlement.
+
+## [2026-05-20 18:31] Docker Image Publishing
+- **Changes:** Added a multi-stage Dockerfile, Docker ignore rules, Docker Compose runtime config, `.env.example`, and a GitHub Actions workflow that builds and pushes GHCR images from `main`, `v*` tags, and manual runs. Documented the container deployment path in `README.md`.
+- **Status:** Completed
+- **Next Steps:** Configure production admin credentials before first container startup and confirm repository package write permissions if GHCR push fails.
+- **Context:** The container build still runs the Vue build before Rust compilation so `frontend/dist` is embedded into the release binary; runtime SQLite data is expected at `/data/tokenaltar.sqlite3`.
