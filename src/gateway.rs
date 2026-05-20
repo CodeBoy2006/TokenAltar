@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json,
@@ -211,10 +214,14 @@ async fn handle_gateway(
     for attempt_index in 0..max_attempts {
         state.db.refresh_channel_windows().await?;
         let channels = state.db.list_route_channels_for_api_key(api_key.id).await?;
+        let required_points_by_channel =
+            required_points_by_channel(&state, &channels, &request.model, token_estimate.tokens)
+                .await?;
         let decision = match choose_channel(
             &channels,
             &request.model,
             affinity_hit.clone(),
+            &required_points_by_channel,
             &state.router_state,
             settings.routing_fire_sale_weight_multiplier,
         )
@@ -371,6 +378,27 @@ async fn handle_gateway(
     Err(last_retry_error.unwrap_or_else(|| {
         AppError::BadRequest("no healthy channel for requested model".to_string())
     }))
+}
+
+async fn required_points_by_channel(
+    state: &AppState,
+    channels: &[Channel],
+    model: &str,
+    estimated_tokens: i64,
+) -> AppResult<HashMap<i64, f64>> {
+    let settings = state.db.runtime_settings().await?;
+    let mut points_by_channel = HashMap::with_capacity(channels.len());
+    for channel in channels {
+        let price = select_price(
+            model,
+            &state.db.price_book_for_channel(channel.id).await?,
+            &settings,
+        );
+        let required_points =
+            estimated_tokens as f64 * price.input_price_per_1m / settings.pricing_unit_tokens;
+        points_by_channel.insert(channel.id, required_points);
+    }
+    Ok(points_by_channel)
 }
 
 fn has_retry_left(attempt_index: usize, max_attempts: usize) -> bool {

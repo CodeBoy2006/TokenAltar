@@ -50,10 +50,11 @@ pub async fn choose_channel(
     channels: &[Channel],
     model: &str,
     affinity_hit: Option<AffinityHit>,
+    required_points_by_channel: &HashMap<i64, f64>,
     runtime: &RuntimeRouterState,
     fire_sale_weight_multiplier: f64,
 ) -> AppResult<RouteDecision> {
-    let healthy = filter_healthy(channels, model, runtime).await;
+    let healthy = filter_healthy(channels, model, required_points_by_channel, runtime).await;
     if healthy.is_empty() {
         return Err(AppError::BadRequest(
             "no healthy channel for requested model".to_string(),
@@ -97,6 +98,7 @@ pub async fn choose_channel(
 async fn filter_healthy<'a>(
     channels: &'a [Channel],
     model: &str,
+    required_points_by_channel: &HashMap<i64, f64>,
     runtime: &RuntimeRouterState,
 ) -> Vec<&'a Channel> {
     let mut healthy = Vec::new();
@@ -109,18 +111,24 @@ async fn filter_healthy<'a>(
         {
             continue;
         }
-        if channel.limits.windows.is_empty()
-            || channel
-                .limits
-                .windows
-                .iter()
-                .any(|window| window.limit_points - window.used_points <= f64::EPSILON)
-        {
+        let required_points = required_points_by_channel
+            .get(&channel.id)
+            .copied()
+            .unwrap_or(f64::INFINITY);
+        if !has_quota_for_estimate(channel, required_points) {
             continue;
         }
         healthy.push(channel);
     }
     healthy
+}
+
+fn has_quota_for_estimate(channel: &Channel, required_points: f64) -> bool {
+    required_points.is_finite()
+        && !channel.limits.windows.is_empty()
+        && channel.limits.windows.iter().all(|window| {
+            window.limit_points - window.used_points + f64::EPSILON >= required_points
+        })
 }
 
 fn weighted_choice(
@@ -209,9 +217,54 @@ mod tests {
                 limits: limits(100.0),
             },
         ];
-        let decision = choose_channel(&channels, "gpt-test", None, &runtime, 5.0)
+        let required_points = HashMap::from([(1, 1.0), (2, 1.0)]);
+        let decision = choose_channel(&channels, "gpt-test", None, &required_points, &runtime, 5.0)
             .await
             .unwrap();
+        assert_eq!(decision.channel.id, 2);
+    }
+
+    #[tokio::test]
+    async fn skips_channel_without_enough_quota_for_estimate() {
+        let runtime = RuntimeRouterState::default();
+        let channels = vec![
+            Channel {
+                id: 1,
+                owner_user_id: 1,
+                name: "tiny".to_string(),
+                provider: ProviderKind::OpenAi,
+                base_url: "http://example.test".to_string(),
+                api_key_secret: "x".to_string(),
+                models: vec!["*".to_string()],
+                enabled: true,
+                status: "healthy".to_string(),
+                health_checked_at: None,
+                upstream_latency_ms: None,
+                last_error: None,
+                limits: limits(0.01),
+            },
+            Channel {
+                id: 2,
+                owner_user_id: 1,
+                name: "roomy".to_string(),
+                provider: ProviderKind::OpenAi,
+                base_url: "http://example.test".to_string(),
+                api_key_secret: "x".to_string(),
+                models: vec!["*".to_string()],
+                enabled: true,
+                status: "healthy".to_string(),
+                health_checked_at: None,
+                upstream_latency_ms: None,
+                last_error: None,
+                limits: limits(100.0),
+            },
+        ];
+        let required_points = HashMap::from([(1, 1.0), (2, 1.0)]);
+
+        let decision = choose_channel(&channels, "gpt-test", None, &required_points, &runtime, 5.0)
+            .await
+            .unwrap();
+
         assert_eq!(decision.channel.id, 2);
     }
 

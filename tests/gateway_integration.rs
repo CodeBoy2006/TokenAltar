@@ -289,6 +289,51 @@ async fn exhausted_channel_is_marked_unavailable() {
 }
 
 #[tokio::test]
+async fn routing_skips_channel_that_cannot_cover_estimated_reserve() {
+    let upstream = spawn_upstream(json!({
+        "id": "resp_small_quota_should_not_be_used",
+        "model": "gpt-test",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "wrong"}]}],
+        "usage": {"input_tokens": 8, "output_tokens": 2}
+    }))
+    .await;
+    let backup = spawn_upstream(json!({
+        "id": "resp_large_quota",
+        "model": "gpt-test",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "backup ok"}]}],
+        "usage": {"input_tokens": 8, "output_tokens": 2}
+    }))
+    .await;
+    let (state, token) = setup_state(upstream).await;
+    add_test_channel(&state, backup, "openai").await;
+    sqlx::query("UPDATE channel_quota_windows SET used_points = limit_points - 0.000001 WHERE channel_id = 1")
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({"model": "gpt-test", "input": "hello"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let ledger = state.db.list_ledger(None).await.unwrap();
+    assert_eq!(ledger[0]["channel_id"], 2);
+}
+
+#[tokio::test]
 async fn channel_price_override_is_used_for_settlement() {
     let upstream = spawn_upstream(json!({
         "id": "resp_test",

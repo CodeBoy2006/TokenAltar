@@ -292,3 +292,9 @@
 - **Status:** Completed
 - **Next Steps:** Migrate any existing `*_tokenaltar-data` volume into `tokenaltar-data` before starting the updated stack.
 - **Context:** Compose otherwise prefixes named volumes with the project name, so changing checkout directories or project names can silently create a fresh SQLite volume.
+
+## [2026-05-20 21:22] Route Quota Reserve Fit
+- **Changes:** Updated gateway routing to compute each candidate channel's estimated reserve with its effective price book, and changed channel selection to skip channels whose quota windows cannot cover that estimate. Added unit and gateway regression coverage for the small-remaining-quota fallback path.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** The transactional reservation check remains the final concurrent safety guard; routing now avoids picking known-underfilled candidates before that transaction.
