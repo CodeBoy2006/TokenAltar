@@ -1,7 +1,7 @@
-# TokenAltar
+
 
 <p align="center">
-  <img src="frontend/public/logo.png" alt="TokenAltar logo" width="132" />
+  <img src="assets/banner.png" alt="TokenAltar logo" width="400" />
 </p>
 
 ![TokenAltar project guide](frontend/public/guides/tokenaltar-project-guide.png)
@@ -34,6 +34,8 @@ member account
   -> usage settlement
   -> consumer debit + provider reward + ledger record
 ```
+
+![Flow](assets/core-flow.png)
 
 The gateway estimates input usage before forwarding a request, reserves local points and channel quota, then settles against upstream `usage` when the response completes. Failed retry attempts release their reservation before another eligible channel is tried.
 
