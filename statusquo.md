@@ -238,3 +238,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Claude cache write tiers are not modeled separately; the single cache price field maps to cached input/cache-hit pricing.
+
+## [2026-05-20 17:01] Guide Mechanism Rulebook
+- **Changes:** Added an English, user-facing rulebook section below the Guide relief image with Roman-column styling and dynamic wording for global membership, capacity, and pricing policy without exposing raw keys, channel inventory, quotas, prices, or multipliers.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** Verified with `pnpm --dir frontend build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo build --release`, `git diff --check`, and Playwright desktop/mobile Guide screenshots against a temporary SQLite database.

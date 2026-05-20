@@ -86,6 +86,14 @@ type PricePreset = {
   cache: number
 }
 
+type GuideMechanism = {
+  index: string
+  badge: string
+  title: string
+  summary: string
+  points: string[]
+}
+
 const pricePresets: PricePreset[] = [
   { key: 'gpt-5.5', label: 'GPT-5.5', pattern: '^gpt-5\\.5$', input: 5, output: 30, cache: 0.5 },
   { key: 'gpt-5.4', label: 'GPT-5.4', pattern: '^gpt-5\\.4$', input: 2.5, output: 15, cache: 0.25 },
@@ -374,6 +382,80 @@ const leaderboardSummary = computed(() => {
   ]
 })
 const priceSaveDisabled = computed(() => !isAdmin.value && !priceForm.channel_id)
+const guideOnboardingMode = computed(() =>
+  runtimeSettings.value.invite_required ? 'invite-gated membership' : 'open registration',
+)
+const guideCapacityMode = computed(() =>
+  (runtimeSettings.value.default_channel_windows || []).length > 0 ? 'windowed capacity policy' : 'operator-defined capacity policy',
+)
+const guidePricingMode = computed(() =>
+  runtimeSettings.value.pricing_unit_tokens === 1000000 ? 'per-million token tariff' : 'configured token tariff',
+)
+const guideCanonIntro = computed(() =>
+  `TokenAltar is governed as an ${guideOnboardingMode.value} with ${guideCapacityMode.value}, ${guidePricingMode.value}, and passive health records. The wording follows the active console policy without exposing raw keys, channel inventory, quotas, prices, or multipliers.`,
+)
+const guideMechanisms = computed<GuideMechanism[]>(() => [
+  {
+    index: 'I',
+    badge: guideOnboardingMode.value,
+    title: 'Access Charter',
+    summary: 'Members enter through console accounts and call models through TokenAltar-issued client keys. The current membership policy controls who may join the circle.',
+    points: [
+      'Client keys can be fenced by model family and permitted routing lanes.',
+      'Disabled accounts lose console sessions, key access, and active channel routing.',
+    ],
+  },
+  {
+    index: 'II',
+    badge: guideCapacityMode.value,
+    title: 'Capacity Covenant',
+    summary: 'Providers contribute upstream channels, each declaring model coverage and capacity windows. Every active window is treated as a hard routing constraint.',
+    points: [
+      'The primary window guides availability, route weight, and end-of-window fire-sale behavior.',
+      'Provider secrets remain sealed inside channel records while owner-scoped views keep capacity manageable.',
+    ],
+  },
+  {
+    index: 'III',
+    badge: 'affinity-aware routing',
+    title: 'Routing Rite',
+    summary: 'Each request passes through key scope, model coverage, quota state, health, cooldown, and affinity checks before a channel is chosen.',
+    points: [
+      'Cache-sensitive or tenant-bound traffic can stay on stable lanes for a configured lifetime.',
+      'Retryable failures and empty semantic replies may switch lanes before meaningful content reaches the client.',
+    ],
+  },
+  {
+    index: 'IV',
+    badge: guidePricingMode.value,
+    title: 'Settlement Canon',
+    summary: 'Usage settles after upstream usage is known. Channel tariffs override global model patterns, and global patterns override the runtime fallback policy.',
+    points: [
+      'Input, output, and cache tokens are accounted as separate settlement surfaces.',
+      'Surge and fire-sale policies adjust the final point flow without changing the client API.',
+    ],
+  },
+  {
+    index: 'V',
+    badge: 'passive health watch',
+    title: 'Health Chronicle',
+    summary: 'Channel health is learned from real traffic instead of scheduled probes. Windows distinguish available, empty, degraded, and down outcomes.',
+    points: [
+      'TTFT is averaged from successful non-empty samples only.',
+      'The console refreshes affected health panels through live topic invalidations.',
+    ],
+  },
+  {
+    index: 'VI',
+    badge: 'social treasury',
+    title: 'Point Economy',
+    summary: 'Points connect model consumption, provider rewards, transfers, phrase packets, and leaderboards into one visible economy.',
+    points: [
+      'Provider boards rank token supply; consumer boards rank settled point burn.',
+      'Ranking visibility follows each steward profile while ledger history remains accountable.',
+    ],
+  },
+])
 
 async function api<T = unknown>(path: string, options: RequestInit = {}) {
   error.value = ''
@@ -1970,6 +2052,30 @@ onBeforeUnmount(stopConsoleEventStream)
           <a class="guide-frame" href="/guides/tokenaltar-project-guide.png" target="_blank" rel="noreferrer">
             <img src="/guides/tokenaltar-project-guide.png" alt="TokenAltar project guide relief" />
           </a>
+          <section class="guide-codex" aria-labelledby="guide-codex-title">
+            <div class="guide-codex-hero">
+              <div>
+                <span class="section-kicker">Living Rulebook</span>
+                <h3 id="guide-codex-title">Mechanisms beneath the relief</h3>
+                <p>{{ guideCanonIntro }}</p>
+              </div>
+            </div>
+            <div class="guide-pillars">
+              <article v-for="item in guideMechanisms" :key="item.index" class="guide-pillar-card">
+                <div class="pillar-capital" aria-hidden="true">
+                  <span>{{ item.index }}</span>
+                </div>
+                <div class="guide-pillar-body">
+                  <span class="guide-badge">{{ item.badge }}</span>
+                  <h4>{{ item.title }}</h4>
+                  <p>{{ item.summary }}</p>
+                  <ul>
+                    <li v-for="point in item.points" :key="point">{{ point }}</li>
+                  </ul>
+                </div>
+              </article>
+            </div>
+          </section>
         </section>
 
         <section v-if="activeTab === 'settings' && isAdmin">
