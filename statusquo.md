@@ -244,3 +244,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Verified with `pnpm --dir frontend build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo build --release`, `git diff --check`, and Playwright desktop/mobile Guide screenshots against a temporary SQLite database.
+
+## [2026-05-20 17:16] README Product Polish
+- **Changes:** Reworked `README.md` into a polished product-facing project page, placed the Guide PNG banner below the title, reorganized feature, mechanism, console, gateway, operations, configuration, and verification sections, and refreshed wording for current routing/pricing/health behavior.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** Verified with `pnpm --dir frontend build`, `git diff --check`, and explicit checks that `frontend/public/guides/tokenaltar-project-guide.png` and the built `frontend/dist/guides/tokenaltar-project-guide.png` exist.
