@@ -17,3 +17,4 @@ services:
 
 volumes:
   tokenaltar-data:
+    name: tokenaltar-data

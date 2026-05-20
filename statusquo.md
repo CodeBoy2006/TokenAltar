@@ -286,3 +286,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Provider settlement still uses `provider_points = total_points * default_channel_provider_share`; values above `1.0` now intentionally represent subsidized provider payout.
+
+## [2026-05-20 20:46] Stable Docker Volume Name
+- **Changes:** Added an explicit Docker Compose volume name for `tokenaltar-data` and documented how to migrate data from older project-prefixed Compose volumes.
+- **Status:** Completed
+- **Next Steps:** Migrate any existing `*_tokenaltar-data` volume into `tokenaltar-data` before starting the updated stack.
+- **Context:** Compose otherwise prefixes named volumes with the project name, so changing checkout directories or project names can silently create a fresh SQLite volume.

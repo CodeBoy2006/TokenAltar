@@ -163,7 +163,7 @@ $EDITOR .env
 docker compose up -d --build
 ```
 
-The compose service publishes TokenAltar on `http://localhost:8080`, binds the application to `0.0.0.0:8080` inside the container, and persists SQLite data in the `tokenaltar-data` volume at `/data/tokenaltar.sqlite3`.
+The compose service publishes TokenAltar on `http://localhost:8080`, binds the application to `0.0.0.0:8080` inside the container, and persists SQLite data in the fixed Docker volume `tokenaltar-data` at `/data/tokenaltar.sqlite3`. The volume is explicitly named so updates from a different checkout directory or Compose project still reuse the same database volume.
 
 To pull the image built by GitHub Actions instead of building locally:
 
@@ -171,6 +171,19 @@ To pull the image built by GitHub Actions instead of building locally:
 docker pull ghcr.io/codeboy2006/tokenaltar:latest
 docker compose up -d
 ```
+
+If an earlier Compose deployment created a project-prefixed volume such as `oldproject_tokenaltar-data`, migrate it into the fixed volume before starting the new stack:
+
+```bash
+docker volume create tokenaltar-data
+docker run --rm \
+  -v oldproject_tokenaltar-data:/from:ro \
+  -v tokenaltar-data:/to \
+  alpine sh -c 'cp -a /from/. /to/'
+docker compose up -d
+```
+
+Do not run `docker compose down -v` unless you intentionally want to delete the SQLite database volume.
 
 The image build is automated by `.github/workflows/docker-image.yml`. Pushes to `main`, tags matching `v*`, and manual workflow runs publish to GitHub Container Registry with branch, tag, semantic-version, SHA, and default-branch `latest` tags. The workflow uses the repository `GITHUB_TOKEN`; ensure GitHub Actions has package write permission in the repository settings if GHCR publishing is blocked.
 
