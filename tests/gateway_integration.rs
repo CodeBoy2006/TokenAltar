@@ -430,7 +430,7 @@ async fn runtime_settings_drive_provider_share_settlement() {
         .db
         .upsert_settings(&[tokenaltar::db::SettingUpdate {
             key: "default_channel_provider_share".to_string(),
-            value: "0.25".to_string(),
+            value: "1.25".to_string(),
         }])
         .await
         .unwrap();
@@ -463,7 +463,8 @@ async fn runtime_settings_drive_provider_share_settlement() {
     .fetch_one(&state.db.pool)
     .await
     .unwrap();
-    assert_eq!(row.1, (row.0 * 0.25 * 10_000.0).round() / 10_000.0);
+    assert_eq!(row.1, (row.0 * 1.25 * 10_000.0).round() / 10_000.0);
+    assert!(row.1 > row.0);
 }
 
 #[tokio::test]

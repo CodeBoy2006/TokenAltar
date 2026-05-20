@@ -280,3 +280,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Fixes Axum JSON deserialization failures such as `value: invalid type: integer 50, expected a string` while preserving validation and rejecting non-scalar setting values.
+
+## [2026-05-20 20:24] Provider Payout Multiplier
+- **Changes:** Changed `default_channel_provider_share` validation from ratio-only to any non-negative finite multiplier, renamed the Settings label to Provider Payout Multiplier, documented the wording, and added settlement coverage for a `1.25` payout.
+- **Status:** Completed
+- **Next Steps:** None.
+- **Context:** Provider settlement still uses `provider_points = total_points * default_channel_provider_share`; values above `1.0` now intentionally represent subsidized provider payout.

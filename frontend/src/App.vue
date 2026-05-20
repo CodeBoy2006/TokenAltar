@@ -197,7 +197,7 @@ const settingsSchema = [
   { key: 'default_channel_fire_sale_days_before', label: 'Default Fire Sale Days', type: 'number' },
   { key: 'default_channel_fire_sale_remaining_pct', label: 'Default Fire Sale Remaining', type: 'number' },
   { key: 'default_channel_fire_sale_discount', label: 'Default Fire Sale Discount', type: 'number' },
-  { key: 'default_channel_provider_share', label: 'Global Provider Share', type: 'number' },
+  { key: 'default_channel_provider_share', label: 'Provider Payout Multiplier', type: 'number' },
 ]
 
 const isAdmin = computed(() => user.value?.role === 'admin')

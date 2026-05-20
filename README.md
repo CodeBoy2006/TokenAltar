@@ -186,7 +186,7 @@ Environment variables:
 | `TOKENALTAR_ADMIN_PASSWORD` | unset | Initial password for the first admin. |
 | `TOKENALTAR_LEADERBOARD_TIMEZONE` | server local timezone | Optional IANA timezone for day/month leaderboard windows, for example `Asia/Shanghai`. |
 
-Runtime settings live in the console Settings page and `/api/runtime-settings`. Admins can configure invitation policy, seed balances, per-1M fallback prices, rounding, surge thresholds and multipliers, global provider share, retry/cooldown behavior, route weighting, queue/cache capacities, and defaults for new keys and channels.
+Runtime settings live in the console Settings page and `/api/runtime-settings`. Admins can configure invitation policy, seed balances, per-1M fallback prices, rounding, surge thresholds and multipliers, provider payout multiplier, retry/cooldown behavior, route weighting, queue/cache capacities, and defaults for new keys and channels.
 
 Most request-time economy and routing settings apply without rebuilding. Startup-sized values, such as ledger queue capacity and affinity cache capacity, apply when the process starts.
 

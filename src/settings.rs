@@ -162,7 +162,10 @@ impl RuntimeSettings {
                 values,
                 "default_channel_fire_sale_discount",
             )?,
-            default_channel_provider_share: get_ratio(values, "default_channel_provider_share")?,
+            default_channel_provider_share: get_non_negative_f64(
+                values,
+                "default_channel_provider_share",
+            )?,
         };
         settings.validate_cross_fields()?;
         Ok(settings)
