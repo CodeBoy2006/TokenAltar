@@ -219,7 +219,6 @@ async fn users_create_channels_and_list_only_their_masked_channels() {
                 fire_sale_days_before: 3,
                 fire_sale_remaining_pct: 0.25,
                 fire_sale_discount: 0.2,
-                provider_share: 0.7,
             },
         )
         .await
@@ -245,8 +244,7 @@ async fn users_create_channels_and_list_only_their_masked_channels() {
                         "windows": quota_windows_json(1000),
                         "fire_sale_days_before": 3,
                         "fire_sale_remaining_pct": 0.25,
-                        "fire_sale_discount": 0.2,
-                        "provider_share": 0.7
+                        "fire_sale_discount": 0.2
                     })
                     .to_string(),
                 ))
@@ -373,7 +371,6 @@ async fn admin_manages_users_and_disabled_accounts_cannot_authenticate() {
                 fire_sale_days_before: 3,
                 fire_sale_remaining_pct: 0.25,
                 fire_sale_discount: 0.2,
-                provider_share: 0.7,
             },
         )
         .await
@@ -609,7 +606,6 @@ async fn gateway_reservation_enforces_every_quota_window() {
                 fire_sale_days_before: 3,
                 fire_sale_remaining_pct: 0.25,
                 fire_sale_discount: 0.2,
-                provider_share: 0.7,
             },
         )
         .await
@@ -901,7 +897,6 @@ async fn api_key_channel_selection_controls_route_pool() {
                 fire_sale_days_before: 3,
                 fire_sale_remaining_pct: 0.25,
                 fire_sale_discount: 0.2,
-                provider_share: 0.7,
             },
         )
         .await
@@ -977,7 +972,6 @@ async fn channel_management_updates_copies_batches_and_soft_deletes() {
                 fire_sale_days_before: 3,
                 fire_sale_remaining_pct: 0.25,
                 fire_sale_discount: 0.2,
-                provider_share: 0.7,
             },
         )
         .await
@@ -1004,7 +998,7 @@ async fn channel_management_updates_copies_batches_and_soft_deletes() {
                         "fire_sale_days_before": 4,
                         "fire_sale_remaining_pct": 0.5,
                         "fire_sale_discount": 0.3,
-                        "provider_share": 0.6
+                        "provider_share": 0.01
                     })
                     .to_string(),
                 ))
@@ -1017,6 +1011,13 @@ async fn channel_management_updates_copies_batches_and_soft_deletes() {
     assert_eq!(updated.name, "editable-renamed");
     assert_eq!(updated.api_key_secret, "old-secret");
     assert_eq!(updated.models, vec!["claude-3*"]);
+    let stored_share: (f64,) =
+        sqlx::query_as("SELECT provider_share FROM channel_limits WHERE channel_id = ?")
+            .bind(channel.id)
+            .fetch_one(&state.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored_share.0, 0.7);
 
     let response = app
         .clone()
@@ -1164,8 +1165,7 @@ async fn console_events_push_channel_topic_invalidations() {
                         "windows": quota_windows_json(1500),
                         "fire_sale_days_before": 3,
                         "fire_sale_remaining_pct": 0.25,
-                        "fire_sale_discount": 0.2,
-                        "provider_share": 0.7
+                        "fire_sale_discount": 0.2
                     })
                     .to_string(),
                 ))
@@ -1221,7 +1221,6 @@ async fn setup_state() -> AppState {
                 fire_sale_days_before: 3,
                 fire_sale_remaining_pct: 0.25,
                 fire_sale_discount: 0.2,
-                provider_share: 0.7,
             },
         )
         .await

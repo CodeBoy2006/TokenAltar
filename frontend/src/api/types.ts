@@ -98,7 +98,6 @@ export type ChannelLimits = {
   fire_sale_days_before: number
   fire_sale_remaining_pct: number
   fire_sale_discount: number
-  provider_share: number
 }
 
 export type Channel = {

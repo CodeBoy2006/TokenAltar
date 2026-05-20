@@ -256,3 +256,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Verified with `pnpm --dir frontend build`, `git diff --check`, a built `frontend/dist/logo.png`, and Playwright checks for `/logo.png`, document favicon links, and loaded sidebar logo dimensions.
+
+## [2026-05-20 18:10] Global Provider Share Governance
+- **Changes:** Removed provider-share editing from channel owner inputs and the Vue channel form, made channel create/update use the admin-configured global provider share, and made gateway settlement calculate provider points from the runtime global share rather than per-channel values.
+- **Status:** Completed
+- **Next Steps:** Rebuild/deploy the embedded frontend bundle so the channel form no longer exposes provider-share controls.
+- **Context:** Backward-compatible JSON submissions with `provider_share` are ignored by Serde; regression tests cover ignored channel updates and global-share settlement.

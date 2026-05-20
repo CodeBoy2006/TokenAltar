@@ -417,6 +417,56 @@ async fn runtime_settings_drive_fallback_price_and_surge_multipliers() {
 }
 
 #[tokio::test]
+async fn runtime_settings_drive_provider_share_settlement() {
+    let upstream = spawn_upstream(json!({
+        "id": "resp_provider_share",
+        "model": "provider-share-model",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+        "usage": {"input_tokens": 1000, "output_tokens": 1000}
+    }))
+    .await;
+    let (state, token) = setup_state(upstream).await;
+    state
+        .db
+        .upsert_settings(&[tokenaltar::db::SettingUpdate {
+            key: "default_channel_provider_share".to_string(),
+            value: "0.25".to_string(),
+        }])
+        .await
+        .unwrap();
+    sqlx::query("UPDATE channel_limits SET provider_share = 1.0 WHERE channel_id = 1")
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({"model": "provider-share-model", "input": "hello"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let row: (f64, f64) = sqlx::query_as(
+        "SELECT total_points, provider_points FROM ledger_entries WHERE model = 'provider-share-model'",
+    )
+    .fetch_one(&state.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.1, (row.0 * 0.25 * 10_000.0).round() / 10_000.0);
+}
+
+#[tokio::test]
 async fn routing_max_attempts_is_runtime_configurable() {
     let failing = spawn_status_upstream(StatusCode::BAD_GATEWAY).await;
     let backup = spawn_upstream(json!({
@@ -929,7 +979,6 @@ async fn setup_state_with_provider(upstream: String, provider: &str) -> (AppStat
                 fire_sale_days_before: 3,
                 fire_sale_remaining_pct: 0.25,
                 fire_sale_discount: 0.2,
-                provider_share: 0.7,
             },
         )
         .await
@@ -954,7 +1003,6 @@ async fn add_test_channel(state: &AppState, upstream: String, provider: &str) ->
                 fire_sale_days_before: 3,
                 fire_sale_remaining_pct: 0.25,
                 fire_sale_discount: 0.2,
-                provider_share: 0.7,
             },
         )
         .await

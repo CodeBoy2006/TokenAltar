@@ -19,7 +19,7 @@ TokenAltar runs as a single Rust process with SQLite persistence and embedded fr
 TokenAltar turns scattered LLM accounts into a governed shared pool:
 
 - **Unified gateway:** expose OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini Generate Content routes through local `sk-...` keys.
-- **Provider channels:** let users or admins contribute upstream model channels with model coverage, quota windows, fire-sale policy, and provider-share settlement.
+- **Provider channels:** let users or admins contribute upstream model channels with model coverage, quota windows, fire-sale policy, and globally governed provider-share settlement.
 - **Scoped client keys:** issue keys with enable/disable, soft deletion, rotation, optional expiration, model allow-lists, spend limits, and explicit channel allow-lists.
 - **Dynamic routing:** choose healthy channels by key scope, model coverage, quota state, cooldown, route weight, fire-sale state, and affinity binding.
 - **Point economy:** settle usage into points, reward providers, support P2P transfers, phrase red packets, and day/month leaderboards.
@@ -48,7 +48,7 @@ The gateway estimates input usage before forwarding a request, reserves local po
 | Dashboard | Live capacity, surge state, available tokens, enabled channels, and current point spend. |
 | Users | Admin-only account management, roles, balances, password resets, and account suspension. |
 | API Keys | Client credentials, model fences, spend ceilings, channel allow-lists, rotation, and soft deletion. |
-| Channels | Upstream providers, model coverage, quota windows, fire-sale economics, provider share, cloning, testing, and batch enable/disable. |
+| Channels | Upstream providers, model coverage, quota windows, fire-sale economics, cloning, testing, and batch enable/disable. |
 | Health | Passive request-derived health windows, TTFT, empty replies, degraded samples, and down windows. |
 | Pricing | Per-1M-token model tariffs with channel overrides before global defaults. |
 | Affinity | Admin-only sticky routing rules for tenant/session/cache locality. |
@@ -106,7 +106,7 @@ Prices are stored per **1M tokens** and split into input, output, and cache-toke
 4. global `default`
 5. runtime fallback rates from Settings
 
-Settlement applies the selected tariff, surge multiplier, fire-sale discount, provider share, and configured rounding. Ledger entries keep the final point amount and a readable formula note.
+Settlement applies the selected tariff, surge multiplier, fire-sale discount, admin-configured global provider share, and configured rounding. Ledger entries keep the final point amount and a readable formula note.
 
 Built-in global presets currently cover GPT-5.5, GPT-5.4, GPT-5.3-codex, GPT-5.2, GPT-5.2-codex, Claude Opus 4.7/4.6/4.5/4.1/4, Claude Sonnet 4.6/4.5/4, and Claude Haiku 4.5. The single cache price field represents cached-input/cache-hit pricing.
 
@@ -165,7 +165,7 @@ Environment variables:
 | `TOKENALTAR_ADMIN_PASSWORD` | unset | Initial password for the first admin. |
 | `TOKENALTAR_LEADERBOARD_TIMEZONE` | server local timezone | Optional IANA timezone for day/month leaderboard windows, for example `Asia/Shanghai`. |
 
-Runtime settings live in the console Settings page and `/api/runtime-settings`. Admins can configure invitation policy, seed balances, per-1M fallback prices, rounding, surge thresholds and multipliers, retry/cooldown behavior, route weighting, queue/cache capacities, and defaults for new keys and channels.
+Runtime settings live in the console Settings page and `/api/runtime-settings`. Admins can configure invitation policy, seed balances, per-1M fallback prices, rounding, surge thresholds and multipliers, global provider share, retry/cooldown behavior, route weighting, queue/cache capacities, and defaults for new keys and channels.
 
 Most request-time economy and routing settings apply without rebuilding. Startup-sized values, such as ledger queue capacity and affinity cache capacity, apply when the process starts.
 

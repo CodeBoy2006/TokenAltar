@@ -133,7 +133,6 @@ pub struct ChannelLimits {
     pub fire_sale_days_before: i64,
     pub fire_sale_remaining_pct: f64,
     pub fire_sale_discount: f64,
-    pub provider_share: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

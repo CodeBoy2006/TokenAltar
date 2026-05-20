@@ -140,7 +140,6 @@ const channelForm = reactive({
   fire_sale_days_before: null as number | null,
   fire_sale_remaining_pct: null as number | null,
   fire_sale_discount: null as number | null,
-  provider_share: null as number | null,
 })
 const priceForm = reactive({
   channel_id: null as number | null,
@@ -198,7 +197,7 @@ const settingsSchema = [
   { key: 'default_channel_fire_sale_days_before', label: 'Default Fire Sale Days', type: 'number' },
   { key: 'default_channel_fire_sale_remaining_pct', label: 'Default Fire Sale Remaining', type: 'number' },
   { key: 'default_channel_fire_sale_discount', label: 'Default Fire Sale Discount', type: 'number' },
-  { key: 'default_channel_provider_share', label: 'Default Provider Share', type: 'number' },
+  { key: 'default_channel_provider_share', label: 'Global Provider Share', type: 'number' },
 ]
 
 const isAdmin = computed(() => user.value?.role === 'admin')
@@ -975,7 +974,6 @@ function selectChannel(channel: Channel) {
   channelForm.fire_sale_days_before = channel.limits.fire_sale_days_before
   channelForm.fire_sale_remaining_pct = channel.limits.fire_sale_remaining_pct
   channelForm.fire_sale_discount = channel.limits.fire_sale_discount
-  channelForm.provider_share = channel.limits.provider_share
 }
 
 function resetChannelForm() {
@@ -990,7 +988,6 @@ function resetChannelForm() {
   channelForm.fire_sale_days_before = runtimeSettings.value.default_channel_fire_sale_days_before ?? null
   channelForm.fire_sale_remaining_pct = runtimeSettings.value.default_channel_fire_sale_remaining_pct ?? null
   channelForm.fire_sale_discount = runtimeSettings.value.default_channel_fire_sale_discount ?? null
-  channelForm.provider_share = runtimeSettings.value.default_channel_provider_share ?? null
 }
 
 function defaultWindows() {
@@ -1171,9 +1168,6 @@ function applyRuntimeDefaults() {
   if (channelForm.fire_sale_discount === null) {
     channelForm.fire_sale_discount = runtimeSettings.value.default_channel_fire_sale_discount ?? null
   }
-  if (channelForm.provider_share === null) {
-    channelForm.provider_share = runtimeSettings.value.default_channel_provider_share ?? null
-  }
   if (priceForm.input_price_per_1m === null) {
     priceForm.input_price_per_1m = runtimeSettings.value.fallback_input_price_per_unit ?? null
   }
@@ -1260,7 +1254,6 @@ function channelPayload() {
     fire_sale_days_before: Number(channelForm.fire_sale_days_before),
     fire_sale_remaining_pct: Number(channelForm.fire_sale_remaining_pct),
     fire_sale_discount: Number(channelForm.fire_sale_discount),
-    provider_share: Number(channelForm.provider_share),
     api_key_secret: channelForm.api_key_secret || null,
     models: splitCsv(channelForm.models),
   }
@@ -1711,7 +1704,6 @@ onBeforeUnmount(stopConsoleEventStream)
             <label>Fire Sale Days <input v-model.number="channelForm.fire_sale_days_before" type="number" /></label>
             <label>Fire Sale Remaining <input v-model.number="channelForm.fire_sale_remaining_pct" type="number" step="0.01" /></label>
             <label>Fire Sale Discount <input v-model.number="channelForm.fire_sale_discount" type="number" step="0.01" /></label>
-            <label>Provider Share <input v-model.number="channelForm.provider_share" type="number" step="0.01" /></label>
           </div>
           <div class="quota-editor panel">
             <div class="subtoolbar">

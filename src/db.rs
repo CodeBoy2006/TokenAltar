@@ -1184,6 +1184,10 @@ impl Database {
         input: ChannelInput,
     ) -> AppResult<Channel> {
         validate_channel_input(&input, true)?;
+        let provider_share = self
+            .runtime_settings()
+            .await?
+            .default_channel_provider_share;
         let mut tx = self.pool.begin().await?;
         let previous_channel_count =
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channels WHERE deleted_at IS NULL")
@@ -1215,7 +1219,7 @@ impl Database {
         .bind(input.fire_sale_days_before)
         .bind(input.fire_sale_remaining_pct)
         .bind(input.fire_sale_discount)
-        .bind(input.provider_share)
+        .bind(provider_share)
         .execute(&mut *tx)
         .await?;
         upsert_quota_windows(&mut tx, channel_id, &input.windows, false).await?;
@@ -1270,6 +1274,10 @@ impl Database {
         if user.role != "admin" && existing.owner_user_id != user.id {
             return Err(AppError::Forbidden);
         }
+        let provider_share = self
+            .runtime_settings()
+            .await?
+            .default_channel_provider_share;
         let models_json = normalize_models_json(&input.models)?;
         let api_key = normalize_optional_text(input.api_key_secret.as_deref())
             .unwrap_or(existing.api_key_secret);
@@ -1307,7 +1315,7 @@ impl Database {
         .bind(input.fire_sale_days_before)
         .bind(input.fire_sale_remaining_pct)
         .bind(input.fire_sale_discount)
-        .bind(input.provider_share)
+        .bind(provider_share)
         .bind(id)
         .execute(&mut *tx)
         .await?;
@@ -1432,7 +1440,6 @@ impl Database {
             fire_sale_days_before: existing.limits.fire_sale_days_before,
             fire_sale_remaining_pct: existing.limits.fire_sale_remaining_pct,
             fire_sale_discount: existing.limits.fire_sale_discount,
-            provider_share: existing.limits.provider_share,
         };
         let clone = self.upsert_channel(existing.owner_user_id, input).await?;
         if !reset_usage {
@@ -2295,7 +2302,6 @@ pub struct ChannelInput {
     pub fire_sale_days_before: i64,
     pub fire_sale_remaining_pct: f64,
     pub fire_sale_discount: f64,
-    pub provider_share: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2310,7 +2316,6 @@ pub struct ChannelUpdateInput {
     pub fire_sale_days_before: i64,
     pub fire_sale_remaining_pct: f64,
     pub fire_sale_discount: f64,
-    pub provider_share: f64,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2440,7 +2445,6 @@ fn channel_from_row(
             fire_sale_days_before: row.get("fire_sale_days_before"),
             fire_sale_remaining_pct: row.get("fire_sale_remaining_pct"),
             fire_sale_discount: row.get("fire_sale_discount"),
-            provider_share: row.get("provider_share"),
         },
     })
 }
@@ -2752,7 +2756,6 @@ fn validate_channel_input(input: &ChannelInput, require_key: bool) -> AppResult<
         input.fire_sale_days_before,
         input.fire_sale_remaining_pct,
         input.fire_sale_discount,
-        input.provider_share,
     )
 }
 
@@ -2774,7 +2777,6 @@ fn validate_channel_update(input: &ChannelUpdateInput) -> AppResult<()> {
         input.fire_sale_days_before,
         input.fire_sale_remaining_pct,
         input.fire_sale_discount,
-        input.provider_share,
     )
 }
 
@@ -2789,7 +2791,6 @@ fn validate_channel_fields(
     fire_sale_days_before: i64,
     fire_sale_remaining_pct: f64,
     fire_sale_discount: f64,
-    provider_share: f64,
 ) -> AppResult<()> {
     if name.trim().is_empty() || name.chars().count() > 120 {
         return Err(AppError::BadRequest(
@@ -2820,8 +2821,6 @@ fn validate_channel_fields(
         || !(0.0..=1.0).contains(&fire_sale_remaining_pct)
         || !fire_sale_discount.is_finite()
         || !(0.0..=1.0).contains(&fire_sale_discount)
-        || !provider_share.is_finite()
-        || !(0.0..=1.0).contains(&provider_share)
     {
         return Err(AppError::BadRequest(
             "channel economy knobs must be finite ratios in range".to_string(),

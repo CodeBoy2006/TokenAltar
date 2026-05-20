@@ -241,7 +241,6 @@ mod tests {
                 fire_sale_days_before: 3,
                 fire_sale_remaining_pct: 0.25,
                 fire_sale_discount: 0.2,
-                provider_share: 0.7,
             },
         }
     }
