@@ -51,6 +51,7 @@ pub struct CreateApiKeyRequest {
     pub enabled: Option<bool>,
     pub spend_limit_points: Option<f64>,
     pub allowed_models: Option<Vec<String>>,
+    pub allowed_channel_ids: Option<Vec<i64>>,
     pub expires_at: Option<String>,
 }
 
@@ -239,6 +240,7 @@ pub async fn create_api_key(
         .await?;
     let record = if request.enabled.is_some()
         || request.allowed_models.is_some()
+        || request.allowed_channel_ids.is_some()
         || request.expires_at.is_some()
     {
         let update = ApiKeyUpdateInput {
@@ -247,6 +249,9 @@ pub async fn create_api_key(
             spend_limit_points: record.spend_limit_points,
             expires_at: request.expires_at,
             allowed_models: request.allowed_models.unwrap_or_default(),
+            allowed_channel_ids: request
+                .allowed_channel_ids
+                .unwrap_or_else(|| record.allowed_channel_ids.clone()),
         };
         state
             .db
@@ -334,6 +339,14 @@ pub async fn list_channels(
     Ok(Json(json!(
         state.db.list_public_channels(&auth.user).await?
     )))
+}
+
+pub async fn list_route_channel_options(
+    State(state): State<crate::app::AppState>,
+    ConsoleAuth(_auth): ConsoleAuth,
+) -> AppResult<Json<serde_json::Value>> {
+    state.db.refresh_channel_windows().await?;
+    Ok(Json(json!(state.db.list_public_route_channels().await?)))
 }
 
 pub async fn create_channel(

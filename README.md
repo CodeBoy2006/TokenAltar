@@ -58,6 +58,8 @@ The console prevents removing the last enabled admin or disabling the current ad
 API keys are managed from the console and through `/api/api-keys`.
 Each key supports enable/disable, soft deletion, one-time rotation, optional expiration, a cumulative point spend limit, and an optional model allow-list.
 Model allow-lists accept exact model names and prefix wildcards such as `gpt-4o*`; empty allow-lists allow every model.
+Each key also stores an explicit channel allow-list. The console exposes a two-column channel picker backed by `/api/route-channels`; selected channels are enforced during gateway routing, while channel secrets remain redacted.
+New keys default to every current route channel, and keys that still cover the full route pool are automatically granted newly created channels.
 Deleted keys are hidden and unusable, but ledger history remains intact.
 
 Channels are managed from `/api/channels`.

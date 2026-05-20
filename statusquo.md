@@ -202,3 +202,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** The guide is content rather than a background, so it lives under `guides` and links to the original image for full-size viewing.
+
+## [2026-05-20 12:45] API Key Channel Selection
+- **Changes:** Added `api_key_channels` persistence, route-channel API output, gateway route filtering per key, and a two-column draggable channel picker in the API key console.
+- **Status:** Completed
+- **Next Steps:** Use the API Keys tab to narrow keys that should not access the whole route pool.
+- **Context:** New keys default to all current route channels; keys that still cover the full pool are auto-granted newly created channels, while manually narrowed keys stay narrowed.

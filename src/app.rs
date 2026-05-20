@@ -116,6 +116,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api-keys/{id}/rotate", post(crate::admin::rotate_api_key))
         .route(
+            "/route-channels",
+            get(crate::admin::list_route_channel_options),
+        )
+        .route(
             "/channels",
             get(crate::admin::list_channels).post(crate::admin::create_channel),
         )

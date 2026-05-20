@@ -137,12 +137,17 @@ const runtimeSettings = ref<RuntimeSettings>({})
 const dashboard = ref<Dashboard | null>(null)
 const newApiKey = ref('')
 const claimResult = ref('')
+const routeChannels = ref<any[]>([])
 const selectedApiKeyIds = ref<number[]>([])
 const selectedChannelIds = ref<number[]>([])
 const editingUserId = ref<number | null>(null)
 const editingApiKeyId = ref<number | null>(null)
 const editingChannelId = ref<number | null>(null)
 const channelTestResults = ref<Record<number, string>>({})
+const apiKeyChannelModalOpen = ref(false)
+const apiKeyChannelFilter = ref('')
+const apiKeyChannelAssignedFilter = ref('')
+const draggedApiKeyChannelId = ref<number | null>(null)
 const apiKeyFilter = ref('')
 const channelFilter = ref('')
 const healthFilter = ref('')
@@ -169,6 +174,7 @@ const apiKeyForm = reactive({
   enabled: true,
   expires_at: '',
   allowed_models: '',
+  allowed_channel_ids: [] as number[],
 })
 const channelForm = reactive({
   name: '',
@@ -391,6 +397,17 @@ const filteredApiKeys = computed(() => {
     return haystack.includes(needle)
   })
 })
+const apiKeyChannelOptions = computed(() => routeChannels.value.length > 0 ? routeChannels.value : channels.value)
+const selectedApiKeyChannels = computed(() => {
+  const selected = new Set(apiKeyForm.allowed_channel_ids)
+  return apiKeyChannelOptions.value.filter((channel) => selected.has(channel.id))
+})
+const availableApiKeyChannels = computed(() => {
+  const selected = new Set(apiKeyForm.allowed_channel_ids)
+  return apiKeyChannelOptions.value.filter((channel) => !selected.has(channel.id))
+})
+const filteredAvailableApiKeyChannels = computed(() => filterApiKeyChannels(availableApiKeyChannels.value, apiKeyChannelFilter.value))
+const filteredSelectedApiKeyChannels = computed(() => filterApiKeyChannels(selectedApiKeyChannels.value, apiKeyChannelAssignedFilter.value))
 const filteredChannels = computed(() => {
   const needle = channelFilter.value.trim().toLowerCase()
   if (!needle) return channels.value
@@ -566,7 +583,7 @@ async function refreshAll() {
     await Promise.all([
       loadDashboard(),
       isAdmin.value ? loadUsers() : Promise.resolve(),
-      loadApiKeys(),
+      loadRouteChannels(),
       loadChannels(),
       loadPrices(),
       isAdmin.value ? loadRules() : Promise.resolve(),
@@ -711,8 +728,8 @@ async function flushConsoleTopicRefresh() {
     if (topics.has('runtimeSettings')) tasks.push(loadRuntimeSettings())
     if (topics.has('dashboard')) tasks.push(loadDashboard())
     if (topics.has('users') && isAdmin.value) tasks.push(loadUsers())
-    if (topics.has('apiKeys')) tasks.push(loadApiKeys())
-    if (topics.has('channels')) tasks.push(loadChannels())
+    if (topics.has('apiKeys')) tasks.push(loadRouteChannels())
+    if (topics.has('channels')) tasks.push(Promise.all([loadChannels(), loadRouteChannels()]))
     if (topics.has('prices')) tasks.push(loadPrices())
     if (topics.has('affinityRules') && isAdmin.value) tasks.push(loadRules())
     if (topics.has('ledger')) tasks.push(loadLedger())
@@ -730,8 +747,15 @@ async function flushConsoleTopicRefresh() {
 async function loadDashboard() { dashboard.value = await api('/dashboard') }
 async function loadUsers() { users.value = await api('/users') }
 async function loadApiKeys() { apiKeys.value = await api('/api-keys') }
+async function loadRouteChannels() {
+  routeChannels.value = await api('/route-channels')
+  pruneApiKeyChannelSelection()
+  applyDefaultApiKeyChannels()
+  await loadApiKeys()
+}
 async function loadChannels() {
   channels.value = await api('/channels')
+  pruneApiKeyChannelSelection()
   if (!isAdmin.value && channels.value.length === 0) {
     priceForm.channel_id = null
   } else if (!isAdmin.value && !channels.value.some((channel) => channel.id === priceForm.channel_id)) {
@@ -845,6 +869,7 @@ async function createApiKey() {
   newApiKey.value = data.token
   editingApiKeyId.value = data.record.id
   await loadApiKeys()
+  selectApiKey(data.record)
 }
 
 async function toggleApiKey(record: any) {
@@ -901,6 +926,131 @@ function toggleFilteredApiKeys() {
   ]))
 }
 
+function filterApiKeyChannels(source: any[], query: string) {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return source
+  return source.filter((channel) => channelSearchText(channel).includes(needle))
+}
+
+function channelSearchText(channel: any) {
+  const totals = healthTotals(channel)
+  return [
+    channel.name,
+    channel.provider,
+    channel.status,
+    channel.enabled ? 'enabled' : 'disabled',
+    channel.base_url,
+    isAdmin.value ? ownerLabel(channel) : '',
+    healthSummary(channel).label,
+    quotaSummary(channel),
+    totals.avgTtftMs === null ? 'ttft n/a' : `ttft ${fmt(totals.avgTtftMs, 0)}ms`,
+    ...(channel.models || []),
+  ].join(' ').toLowerCase()
+}
+
+function normalizeChannelIds(ids: unknown[]) {
+  const visible = new Set(apiKeyChannelOptions.value.map((channel) => channel.id))
+  const normalized: number[] = []
+  for (const id of ids) {
+    const numeric = Number(id)
+    if (Number.isInteger(numeric) && visible.has(numeric) && !normalized.includes(numeric)) {
+      normalized.push(numeric)
+    }
+  }
+  return normalized
+}
+
+function pruneApiKeyChannelSelection() {
+  apiKeyForm.allowed_channel_ids = normalizeChannelIds(apiKeyForm.allowed_channel_ids)
+}
+
+function openApiKeyChannelModal() {
+  pruneApiKeyChannelSelection()
+  apiKeyChannelModalOpen.value = true
+}
+
+function closeApiKeyChannelModal() {
+  draggedApiKeyChannelId.value = null
+  apiKeyChannelModalOpen.value = false
+}
+
+function addApiKeyChannel(channelId: number) {
+  if (!apiKeyForm.allowed_channel_ids.includes(channelId)) {
+    apiKeyForm.allowed_channel_ids.push(channelId)
+  }
+}
+
+function removeApiKeyChannel(channelId: number) {
+  apiKeyForm.allowed_channel_ids = apiKeyForm.allowed_channel_ids.filter((id) => id !== channelId)
+}
+
+function selectAllApiKeyChannels() {
+  apiKeyForm.allowed_channel_ids = apiKeyChannelOptions.value.map((channel) => channel.id)
+}
+
+function clearApiKeyChannels() {
+  apiKeyForm.allowed_channel_ids = []
+}
+
+function selectFilteredApiKeyChannels() {
+  for (const channel of filteredAvailableApiKeyChannels.value) {
+    addApiKeyChannel(channel.id)
+  }
+}
+
+function clearFilteredApiKeyChannels() {
+  const removeIds = new Set(filteredSelectedApiKeyChannels.value.map((channel) => channel.id))
+  apiKeyForm.allowed_channel_ids = apiKeyForm.allowed_channel_ids.filter((id) => !removeIds.has(id))
+}
+
+function startApiKeyChannelDrag(event: DragEvent, channelId: number) {
+  draggedApiKeyChannelId.value = channelId
+  event.dataTransfer?.setData('text/plain', String(channelId))
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+  }
+}
+
+function dropApiKeyChannel(event: DragEvent, target: 'available' | 'selected') {
+  const rawId = event.dataTransfer?.getData('text/plain')
+  const channelId = Number(rawId || draggedApiKeyChannelId.value)
+  if (!Number.isInteger(channelId)) return
+  if (target === 'selected') {
+    addApiKeyChannel(channelId)
+  } else {
+    removeApiKeyChannel(channelId)
+  }
+  draggedApiKeyChannelId.value = null
+}
+
+function channelSelectionLabel(ids: unknown[]) {
+  const selected = ids.filter((id) => Number.isInteger(Number(id)))
+  if (apiKeyChannelOptions.value.length === 0) return 'No channels available'
+  if (selected.length === 0) return 'No channels selected'
+  if (selected.length === apiKeyChannelOptions.value.length) return 'All route channels'
+  return `${selected.length} / ${apiKeyChannelOptions.value.length} channels`
+}
+
+function apiKeyChannelNames(ids: unknown[]) {
+  const selected = new Set(ids.map((id) => Number(id)).filter(Number.isInteger))
+  const names = apiKeyChannelOptions.value
+    .filter((channel) => selected.has(channel.id))
+    .slice(0, 3)
+    .map((channel) => channel.name)
+  if (names.length === 0) return 'none'
+  const extra = selected.size - names.length
+  return extra > 0 ? `${names.join(', ')} +${extra}` : names.join(', ')
+}
+
+function channelCardTitle(channel: any) {
+  return [
+    channel.name,
+    channel.provider,
+    channel.models?.join(', ') || '*',
+    healthSummary(channel).detail,
+  ].join(' / ')
+}
+
 function selectApiKey(record: any) {
   editingApiKeyId.value = record.id
   apiKeyForm.name = record.name
@@ -908,6 +1058,9 @@ function selectApiKey(record: any) {
   apiKeyForm.enabled = record.enabled
   apiKeyForm.expires_at = record.expires_at || ''
   apiKeyForm.allowed_models = (record.allowed_models || []).join(', ')
+  apiKeyForm.allowed_channel_ids = normalizeChannelIds(record.allowed_channel_ids || [])
+  apiKeyChannelFilter.value = ''
+  apiKeyChannelAssignedFilter.value = ''
 }
 
 function resetApiKeyForm() {
@@ -917,6 +1070,16 @@ function resetApiKeyForm() {
   apiKeyForm.enabled = true
   apiKeyForm.expires_at = ''
   apiKeyForm.allowed_models = ''
+  apiKeyForm.allowed_channel_ids = apiKeyChannelOptions.value.map((channel) => channel.id)
+  apiKeyChannelFilter.value = ''
+  apiKeyChannelAssignedFilter.value = ''
+  apiKeyChannelModalOpen.value = false
+}
+
+function applyDefaultApiKeyChannels() {
+  if (!editingApiKeyId.value && !apiKeyChannelModalOpen.value && apiKeyForm.allowed_channel_ids.length === 0) {
+    apiKeyForm.allowed_channel_ids = apiKeyChannelOptions.value.map((channel) => channel.id)
+  }
 }
 
 async function createChannel() {
@@ -1162,6 +1325,7 @@ function applyRuntimeDefaults() {
   if (!priceForm.channel_id && channels.value.length > 0) {
     priceForm.channel_id = channels.value[0].id
   }
+  applyDefaultApiKeyChannels()
   if (!editingApiKeyId.value && apiKeyForm.spend_limit_points === null) {
     apiKeyForm.spend_limit_points = runtimeSettings.value.default_api_key_spend_limit_points ?? null
   }
@@ -1276,6 +1440,7 @@ function apiKeyPayload() {
     spend_limit_points: optionalNumber(apiKeyForm.spend_limit_points),
     expires_at: apiKeyForm.expires_at || null,
     allowed_models: splitCsv(apiKeyForm.allowed_models),
+    allowed_channel_ids: normalizeChannelIds(apiKeyForm.allowed_channel_ids),
   }
 }
 
@@ -1441,7 +1606,7 @@ onBeforeUnmount(stopConsoleEventStream)
 </script>
 
 <template>
-  <main class="shell" :class="{ 'auth-shell': !user }" :style="consoleBackgroundStyle">
+  <main class="shell" :class="{ 'auth-shell': !user, 'modal-open': apiKeyChannelModalOpen }" :style="consoleBackgroundStyle">
     <aside v-if="user" class="sidebar">
       <div class="brand">
         <div class="mark"><span>TA</span></div>
@@ -1702,7 +1867,132 @@ onBeforeUnmount(stopConsoleEventStream)
             <label>Spend Limit <input v-model.number="apiKeyForm.spend_limit_points" type="number" /></label>
             <label>Expires At <input v-model="apiKeyForm.expires_at" placeholder="2026-06-01T00:00:00Z" /></label>
             <label>Allowed Models <input v-model="apiKeyForm.allowed_models" placeholder="gpt-4o*, claude-3*" /></label>
+            <div class="key-channel-field">
+              <span>Allowed Channels</span>
+              <button type="button" class="ghost channel-picker-trigger" @click="openApiKeyChannelModal">
+                <strong>{{ channelSelectionLabel(apiKeyForm.allowed_channel_ids) }}</strong>
+                <small>{{ apiKeyChannelNames(apiKeyForm.allowed_channel_ids) }}</small>
+              </button>
+            </div>
           </div>
+          <Teleport to="body">
+            <div v-if="apiKeyChannelModalOpen" class="modal-backdrop" @click.self="closeApiKeyChannelModal">
+              <div class="channel-picker-modal" role="dialog" aria-modal="true" aria-label="API key channel selection">
+                <div class="channel-picker-header">
+                  <div>
+                    <span class="section-kicker">Key channel routing</span>
+                    <h3>{{ apiKeyForm.name || 'Client key' }}</h3>
+                    <p>{{ channelSelectionLabel(apiKeyForm.allowed_channel_ids) }} can receive traffic from this credential.</p>
+                  </div>
+                  <div class="channel-picker-actions">
+                    <button class="ghost" type="button" @click="selectAllApiKeyChannels">Select All</button>
+                    <button class="ghost" type="button" @click="clearApiKeyChannels">Clear</button>
+                    <button type="button" @click="closeApiKeyChannelModal">Done</button>
+                  </div>
+                </div>
+
+                <div class="channel-picker-grid">
+                  <section class="channel-picker-column" @dragover.prevent @drop="dropApiKeyChannel($event, 'available')">
+                    <div class="channel-picker-column-head">
+                      <div>
+                        <span>Available channels</span>
+                        <strong>{{ filteredAvailableApiKeyChannels.length }} / {{ availableApiKeyChannels.length }}</strong>
+                      </div>
+                      <button class="ghost" type="button" :disabled="filteredAvailableApiKeyChannels.length === 0" @click="selectFilteredApiKeyChannels">Add Visible</button>
+                    </div>
+                    <input v-model="apiKeyChannelFilter" class="search-input" placeholder="Filter provider, health, model" />
+                    <div class="channel-card-list">
+                      <article
+                        v-for="channel in filteredAvailableApiKeyChannels"
+                        :key="`available-${channel.id}`"
+                        class="channel-select-card"
+                        :class="{ disabled: !channel.enabled }"
+                        draggable="true"
+                        :title="channelCardTitle(channel)"
+                        @dragstart="startApiKeyChannelDrag($event, channel.id)"
+                        @dblclick="addApiKeyChannel(channel.id)"
+                      >
+                        <div class="channel-select-card-main">
+                          <div>
+                            <strong>{{ channel.name }}</strong>
+                            <span v-if="isAdmin">{{ ownerLabel(channel) }}</span>
+                          </div>
+                          <span class="provider-badge" :class="providerTone(channel.provider)">{{ channel.provider }}</span>
+                        </div>
+                        <div class="channel-select-meta">
+                          <span class="status" :class="statusClass(channel)">{{ channel.enabled ? channel.status : 'disabled' }}</span>
+                          <span>{{ healthSummary(channel).label }} / {{ formatTtft(healthTotals(channel).avgTtftMs) }}</span>
+                        </div>
+                        <div class="mini-health-strip">
+                          <span
+                            v-for="window in healthWindows(channel).slice(-16)"
+                            :key="`${channel.id}:available-mini:${window.window_start_at}`"
+                            class="health-window"
+                            :class="healthBarClass(window)"
+                          ></span>
+                        </div>
+                        <div class="channel-select-models">{{ (channel.models || []).join(', ') || '*' }}</div>
+                        <div class="channel-select-foot">
+                          <span>{{ quotaSummary(channel) }}</span>
+                          <button class="ghost" type="button" @click.stop="addApiKeyChannel(channel.id)">Add</button>
+                        </div>
+                      </article>
+                      <div v-if="filteredAvailableApiKeyChannels.length === 0" class="channel-picker-empty">No available channels match.</div>
+                    </div>
+                  </section>
+
+                  <section class="channel-picker-column selected" @dragover.prevent @drop="dropApiKeyChannel($event, 'selected')">
+                    <div class="channel-picker-column-head">
+                      <div>
+                        <span>Enabled for this key</span>
+                        <strong>{{ filteredSelectedApiKeyChannels.length }} / {{ selectedApiKeyChannels.length }}</strong>
+                      </div>
+                      <button class="ghost danger" type="button" :disabled="filteredSelectedApiKeyChannels.length === 0" @click="clearFilteredApiKeyChannels">Remove Visible</button>
+                    </div>
+                    <input v-model="apiKeyChannelAssignedFilter" class="search-input" placeholder="Filter selected channels" />
+                    <div class="channel-card-list">
+                      <article
+                        v-for="channel in filteredSelectedApiKeyChannels"
+                        :key="`selected-${channel.id}`"
+                        class="channel-select-card selected"
+                        :class="{ disabled: !channel.enabled }"
+                        draggable="true"
+                        :title="channelCardTitle(channel)"
+                        @dragstart="startApiKeyChannelDrag($event, channel.id)"
+                        @dblclick="removeApiKeyChannel(channel.id)"
+                      >
+                        <div class="channel-select-card-main">
+                          <div>
+                            <strong>{{ channel.name }}</strong>
+                            <span v-if="isAdmin">{{ ownerLabel(channel) }}</span>
+                          </div>
+                          <span class="provider-badge" :class="providerTone(channel.provider)">{{ channel.provider }}</span>
+                        </div>
+                        <div class="channel-select-meta">
+                          <span class="status" :class="statusClass(channel)">{{ channel.enabled ? channel.status : 'disabled' }}</span>
+                          <span>{{ healthSummary(channel).label }} / {{ formatTtft(healthTotals(channel).avgTtftMs) }}</span>
+                        </div>
+                        <div class="mini-health-strip">
+                          <span
+                            v-for="window in healthWindows(channel).slice(-16)"
+                            :key="`${channel.id}:selected-mini:${window.window_start_at}`"
+                            class="health-window"
+                            :class="healthBarClass(window)"
+                          ></span>
+                        </div>
+                        <div class="channel-select-models">{{ (channel.models || []).join(', ') || '*' }}</div>
+                        <div class="channel-select-foot">
+                          <span>{{ quotaSummary(channel) }}</span>
+                          <button class="ghost danger" type="button" @click.stop="removeApiKeyChannel(channel.id)">Remove</button>
+                        </div>
+                      </article>
+                      <div v-if="filteredSelectedApiKeyChannels.length === 0" class="channel-picker-empty">Drop channels here to authorize this key.</div>
+                    </div>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </Teleport>
           <p v-if="newApiKey" class="secret">{{ newApiKey }}</p>
           <div class="bulkbar">
             <div class="bulk-meta">
@@ -1719,7 +2009,7 @@ onBeforeUnmount(stopConsoleEventStream)
             <table class="management-table">
               <thead>
                 <tr>
-                  <th></th><th>Name</th><th>Prefix</th><th>Status</th><th>Spend</th><th>Models</th><th>Last Used</th><th>Actions</th>
+                  <th></th><th>Name</th><th>Prefix</th><th>Status</th><th>Spend</th><th>Models</th><th>Channels</th><th>Last Used</th><th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1730,6 +2020,7 @@ onBeforeUnmount(stopConsoleEventStream)
                   <td><span class="status" :class="statusClass(key)">{{ key.enabled ? 'enabled' : 'disabled' }}</span></td>
                   <td class="nowrap">{{ fmt(key.spent_points, 4) }} / {{ key.spend_limit_points ?? 'unlimited' }}</td>
                   <td class="wrap-cell">{{ (key.allowed_models || []).join(', ') || '*' }}</td>
+                  <td class="wrap-cell">{{ channelSelectionLabel(key.allowed_channel_ids || []) }}</td>
                   <td class="muted-cell">{{ key.last_used_at || '-' }}</td>
                   <td>
                     <div class="row-actions">
@@ -1740,7 +2031,7 @@ onBeforeUnmount(stopConsoleEventStream)
                   </td>
                 </tr>
                 <tr v-if="filteredApiKeys.length === 0">
-                  <td colspan="8" class="empty-row">No keys match the current filter.</td>
+                  <td colspan="9" class="empty-row">No keys match the current filter.</td>
                 </tr>
               </tbody>
             </table>

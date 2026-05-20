@@ -1,4 +1,8 @@
-use std::{collections::HashMap, str::FromStr, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    time::Duration,
+};
 
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
@@ -546,19 +550,35 @@ impl Database {
         name: &str,
         spend_limit_points: Option<f64>,
     ) -> AppResult<(String, ApiKeyRecord)> {
+        validate_api_key_name(name)?;
+        validate_spend_limit(spend_limit_points)?;
         let token = generate_token("sk");
         let key_prefix = token.chars().take(12).collect::<String>();
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             "INSERT INTO api_keys(user_id, name, key_prefix, key_hash, spend_limit_points, allowed_models_json, updated_at) VALUES (?, ?, ?, ?, ?, '[]', datetime('now'))",
         )
         .bind(user_id)
-        .bind(name)
+        .bind(name.trim())
         .bind(&key_prefix)
         .bind(hash_token(&token))
         .bind(spend_limit_points)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        let record = self.get_api_key(result.last_insert_rowid()).await?;
+        let api_key_id = result.last_insert_rowid();
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO api_key_channels(api_key_id, channel_id)
+            SELECT ?, id
+            FROM channels
+            WHERE deleted_at IS NULL
+            "#,
+        )
+        .bind(api_key_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let record = self.get_api_key(api_key_id).await?;
         Ok((token, record))
     }
 
@@ -570,7 +590,9 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?
         .ok_or(AppError::NotFound)?;
-        Ok(api_key_from_row(&row))
+        let mut record = api_key_from_row(&row);
+        record.allowed_channel_ids = self.list_api_key_channel_ids(id).await?;
+        Ok(record)
     }
 
     pub async fn list_api_keys(&self, user_id: i64) -> AppResult<Vec<ApiKeyRecord>> {
@@ -580,7 +602,121 @@ impl Database {
         .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(api_key_from_row).collect())
+        let mut records = rows.iter().map(api_key_from_row).collect::<Vec<_>>();
+        self.attach_api_key_channel_ids(&mut records).await?;
+        Ok(records)
+    }
+
+    async fn list_api_key_channel_ids(&self, api_key_id: i64) -> AppResult<Vec<i64>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT akc.channel_id
+            FROM api_key_channels akc
+            JOIN channels c ON c.id = akc.channel_id
+            WHERE akc.api_key_id = ? AND c.deleted_at IS NULL
+            ORDER BY c.id DESC
+            "#,
+        )
+        .bind(api_key_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|row| row.get("channel_id")).collect())
+    }
+
+    async fn attach_api_key_channel_ids(&self, records: &mut [ApiKeyRecord]) -> AppResult<()> {
+        let key_ids = records.iter().map(|record| record.id).collect::<Vec<_>>();
+        if key_ids.is_empty() {
+            return Ok(());
+        }
+        let placeholders = std::iter::repeat_n("?", key_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!(
+            r#"
+            SELECT akc.api_key_id, akc.channel_id
+            FROM api_key_channels akc
+            JOIN channels c ON c.id = akc.channel_id
+            WHERE akc.api_key_id IN ({placeholders}) AND c.deleted_at IS NULL
+            ORDER BY c.id DESC
+            "#
+        );
+        let mut query = sqlx::query(&query);
+        for key_id in &key_ids {
+            query = query.bind(key_id);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        let mut ids_by_key = key_ids
+            .iter()
+            .map(|id| (*id, Vec::new()))
+            .collect::<HashMap<_, _>>();
+        for row in rows {
+            ids_by_key
+                .entry(row.get("api_key_id"))
+                .or_default()
+                .push(row.get("channel_id"));
+        }
+        for record in records {
+            record.allowed_channel_ids = ids_by_key.remove(&record.id).unwrap_or_default();
+        }
+        Ok(())
+    }
+
+    async fn replace_api_key_channels(
+        &self,
+        user_id: i64,
+        api_key_id: i64,
+        channel_ids: &[i64],
+    ) -> AppResult<()> {
+        validate_channel_selection(channel_ids)?;
+        let normalized = unique_positive_ids(channel_ids);
+        if normalized.len() != channel_ids.len() {
+            return Err(AppError::BadRequest(
+                "allowed channel ids must be unique positive integers".to_string(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        let key_exists = sqlx::query(
+            "SELECT 1 FROM api_keys WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        )
+        .bind(api_key_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+        if !key_exists {
+            return Err(AppError::NotFound);
+        }
+        if !normalized.is_empty() {
+            let placeholders = std::iter::repeat_n("?", normalized.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!(
+                "SELECT id FROM channels WHERE id IN ({placeholders}) AND deleted_at IS NULL"
+            );
+            let mut query = sqlx::query(&query);
+            for id in &normalized {
+                query = query.bind(id);
+            }
+            let rows = query.fetch_all(&mut *tx).await?;
+            if rows.len() != normalized.len() {
+                return Err(AppError::BadRequest(
+                    "allowed channels must be visible active channels".to_string(),
+                ));
+            }
+        }
+        sqlx::query("DELETE FROM api_key_channels WHERE api_key_id = ?")
+            .bind(api_key_id)
+            .execute(&mut *tx)
+            .await?;
+        for channel_id in normalized {
+            sqlx::query("INSERT INTO api_key_channels(api_key_id, channel_id) VALUES (?, ?)")
+                .bind(api_key_id)
+                .bind(channel_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn set_api_key_enabled(&self, user_id: i64, id: i64, enabled: bool) -> AppResult<()> {
@@ -628,6 +764,8 @@ impl Database {
         if result.rows_affected() == 0 {
             return Err(AppError::NotFound);
         }
+        self.replace_api_key_channels(user_id, id, &input.allowed_channel_ids)
+            .await?;
         self.get_api_key(id).await
     }
 
@@ -700,7 +838,9 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?
         .ok_or(AppError::Unauthorized)?;
-        Ok(api_key_from_row(&row))
+        let mut record = api_key_from_row(&row);
+        record.allowed_channel_ids = self.list_api_key_channel_ids(record.id).await?;
+        Ok(record)
     }
 
     pub async fn mark_api_key_used(&self, id: i64) -> AppResult<()> {
@@ -853,6 +993,31 @@ impl Database {
             .collect()
     }
 
+    pub async fn list_route_channels_for_api_key(
+        &self,
+        api_key_id: i64,
+    ) -> AppResult<Vec<Channel>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT c.id, c.owner_user_id, c.name, c.provider, c.base_url, c.api_key_secret, c.models_json,
+                   c.enabled, c.status, c.health_checked_at, c.upstream_latency_ms, c.last_error,
+                   l.fire_sale_days_before, l.fire_sale_remaining_pct, l.fire_sale_discount, l.provider_share
+            FROM channels c
+            JOIN api_key_channels akc ON akc.channel_id = c.id
+            JOIN channel_limits l ON c.id = l.channel_id
+            WHERE akc.api_key_id = ? AND c.deleted_at IS NULL
+            ORDER BY c.id DESC
+            "#,
+        )
+        .bind(api_key_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let windows = self.windows_by_channel().await?;
+        rows.iter()
+            .map(|row| channel_from_row(row, &windows))
+            .collect()
+    }
+
     async fn windows_by_channel(&self) -> AppResult<HashMap<i64, Vec<ChannelQuotaWindow>>> {
         let rows = sqlx::query(
             r#"
@@ -983,6 +1148,29 @@ impl Database {
         Ok(channels)
     }
 
+    pub async fn list_public_route_channels(&self) -> AppResult<Vec<PublicChannel>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT c.id, c.owner_user_id, c.name, c.provider, c.base_url, c.api_key_secret, c.models_json,
+                   c.enabled, c.status, c.health_checked_at, c.upstream_latency_ms, c.last_error,
+                   l.fire_sale_days_before, l.fire_sale_remaining_pct, l.fire_sale_discount, l.provider_share
+            FROM channels c JOIN channel_limits l ON c.id = l.channel_id
+            WHERE c.deleted_at IS NULL
+            ORDER BY c.id DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let windows = self.windows_by_channel().await?;
+        let mut channels = rows
+            .iter()
+            .map(|row| channel_from_row(row, &windows))
+            .map(|result| result.map(PublicChannel::from))
+            .collect::<AppResult<Vec<_>>>()?;
+        self.attach_channel_health_windows(&mut channels).await?;
+        Ok(channels)
+    }
+
     pub async fn upsert_channel(
         &self,
         owner_user_id: i64,
@@ -990,6 +1178,10 @@ impl Database {
     ) -> AppResult<Channel> {
         validate_channel_input(&input, true)?;
         let mut tx = self.pool.begin().await?;
+        let previous_channel_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channels WHERE deleted_at IS NULL")
+                .fetch_one(&mut *tx)
+                .await?;
         let models_json = serde_json::to_string(&input.models)
             .map_err(|err| AppError::Anyhow(anyhow::anyhow!(err)))?;
         let result = sqlx::query(
@@ -1020,6 +1212,24 @@ impl Database {
         .execute(&mut *tx)
         .await?;
         upsert_quota_windows(&mut tx, channel_id, &input.windows, false).await?;
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO api_key_channels(api_key_id, channel_id)
+            SELECT k.id, ?
+            FROM api_keys k
+            WHERE k.deleted_at IS NULL
+              AND (
+                SELECT COUNT(*)
+                FROM api_key_channels akc
+                JOIN channels c ON c.id = akc.channel_id
+                WHERE akc.api_key_id = k.id AND c.deleted_at IS NULL
+              ) = ?
+            "#,
+        )
+        .bind(channel_id)
+        .bind(previous_channel_count)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         self.get_channel(channel_id).await
     }
@@ -2110,6 +2320,7 @@ pub struct ApiKeyUpdateInput {
     pub spend_limit_points: Option<f64>,
     pub expires_at: Option<String>,
     pub allowed_models: Vec<String>,
+    pub allowed_channel_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2155,6 +2366,7 @@ fn api_key_from_row(row: &sqlx::sqlite::SqliteRow) -> ApiKeyRecord {
             .as_deref()
             .map(json_array_to_strings)
             .unwrap_or_default(),
+        allowed_channel_ids: Vec::new(),
         last_used_at: row.get("last_used_at"),
     }
 }
@@ -2446,6 +2658,31 @@ fn validate_batch_ids(ids: &[i64]) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_channel_selection(ids: &[i64]) -> AppResult<()> {
+    if ids.len() > 500 {
+        return Err(AppError::BadRequest(
+            "an api key can select at most 500 channels".to_string(),
+        ));
+    }
+    if ids.iter().any(|id| *id <= 0) {
+        return Err(AppError::BadRequest(
+            "allowed channel ids must be positive integers".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn unique_positive_ids(ids: &[i64]) -> Vec<i64> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for id in ids {
+        if *id > 0 && seen.insert(*id) {
+            normalized.push(*id);
+        }
+    }
+    normalized
 }
 
 fn normalize_optional_text(value: Option<&str>) -> Option<String> {

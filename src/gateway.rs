@@ -203,14 +203,14 @@ async fn handle_gateway(
     .await?;
 
     let request_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-    let route_count = state.db.list_route_channels().await?.len();
+    let route_count = api_key.allowed_channel_ids.len();
     let max_attempts = route_count.clamp(1, settings.routing_max_attempts);
     let retry_cooldown = Duration::from_secs(settings.routing_retry_cooldown_seconds);
     let mut last_retry_error: Option<AppError> = None;
 
     for attempt_index in 0..max_attempts {
         state.db.refresh_channel_windows().await?;
-        let channels = state.db.list_route_channels().await?;
+        let channels = state.db.list_route_channels_for_api_key(api_key.id).await?;
         let decision = match choose_channel(
             &channels,
             &request.model,

@@ -257,6 +257,7 @@ async fn users_create_channels_and_list_only_their_masked_channels() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let response = app
+        .clone()
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
@@ -277,6 +278,34 @@ async fn users_create_channels_and_list_only_their_masked_channels() {
     assert_eq!(channels[0]["name"], "alice-pool");
     assert_ne!(channels[0]["id"], bob_channel.id);
     assert!(channels[0].get("api_key_secret").is_none());
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/route-channels")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let route_channels: Value = serde_json::from_slice(&body).unwrap();
+    let route_channels = route_channels.as_array().unwrap();
+    assert!(
+        route_channels
+            .iter()
+            .any(|channel| channel["id"] == bob_channel.id)
+    );
+    assert!(
+        route_channels
+            .iter()
+            .all(|channel| channel.get("api_key_secret").is_none())
+    );
 }
 
 #[tokio::test]
@@ -725,6 +754,13 @@ async fn api_key_management_updates_rotates_and_soft_deletes_keys() {
     let created_id = created["record"]["id"].as_i64().unwrap();
     assert_eq!(created["record"]["enabled"], false);
     assert_eq!(created["record"]["allowed_models"][0], "gpt-4o*");
+    assert_eq!(
+        created["record"]["allowed_channel_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 
     let response = app
         .clone()
@@ -740,7 +776,8 @@ async fn api_key_management_updates_rotates_and_soft_deletes_keys() {
                         "enabled": true,
                         "spend_limit_points": 42,
                         "expires_at": null,
-                        "allowed_models": ["gpt-4o*", "claude-3*"]
+                        "allowed_models": ["gpt-4o*", "claude-3*"],
+                        "allowed_channel_ids": [1]
                     })
                     .to_string(),
                 ))
@@ -834,6 +871,86 @@ async fn api_key_management_updates_rotates_and_soft_deletes_keys() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(state.db.list_api_keys(alice.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn api_key_channel_selection_controls_route_pool() {
+    let state = setup_state().await;
+    let consumer = state
+        .db
+        .create_user("route-key@example.com", "password123", "RouteKey")
+        .await
+        .unwrap();
+    let (token, record) = state
+        .db
+        .create_api_key(consumer.id, "route-key", Some(100.0))
+        .await
+        .unwrap();
+    let second_channel = state
+        .db
+        .upsert_channel(
+            consumer.id,
+            ChannelInput {
+                name: "route-selected".to_string(),
+                provider: "openai".to_string(),
+                base_url: "http://127.0.0.1:9".to_string(),
+                api_key_secret: "route-secret".to_string(),
+                models: vec!["gpt-selected".to_string()],
+                enabled: true,
+                windows: quota_windows(1000),
+                fire_sale_days_before: 3,
+                fire_sale_remaining_pct: 0.25,
+                fire_sale_discount: 0.2,
+                provider_share: 0.7,
+            },
+        )
+        .await
+        .unwrap();
+    let consumer_session = state.db.create_session(consumer.id).await.unwrap();
+    let app = build_router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/api-keys/{}", record.id))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {consumer_session}"))
+                .body(Body::from(
+                    json!({
+                        "name": "route-key",
+                        "enabled": true,
+                        "spend_limit_points": 100,
+                        "expires_at": null,
+                        "allowed_models": [],
+                        "allowed_channel_ids": [second_channel.id]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated = state.db.get_api_key(record.id).await.unwrap();
+    assert_eq!(updated.allowed_channel_ids, vec![second_channel.id]);
+
+    let disallowed = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({ "model": "gpt-test", "input": "hello" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disallowed.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

@@ -23,6 +23,7 @@ pub struct ApiKeyRecord {
     pub spent_points: f64,
     pub expires_at: Option<String>,
     pub allowed_models: Vec<String>,
+    pub allowed_channel_ids: Vec<i64>,
     pub last_used_at: Option<String>,
 }
 
