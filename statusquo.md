@@ -220,3 +220,9 @@
 - **Status:** Completed
 - **Next Steps:** None.
 - **Context:** Verified with `cargo test`, `pnpm --dir frontend build`, and Playwright against a temporary local backend with a non-admin-owned channel.
+
+## [2026-05-20 13:48] Frontend Modularization
+- **Changes:** Split console types/API access, formatting helpers, health helpers, tab metadata, SSE event handling, and reusable provider/health components out of `frontend/src/App.vue`.
+- **Status:** Completed
+- **Next Steps:** Continue reducing page-level template size by extracting feature pages such as API Keys, Channels, Pricing, and Settings.
+- **Context:** Preserved the current tab-driven SPA and single-binary deployment model; verified with frontend build, Rust tests, Clippy, and release build.

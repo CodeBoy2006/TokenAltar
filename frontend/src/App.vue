@@ -1,143 +1,66 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-
-type User = {
-  id: number
-  email: string
-  role: string
-  display_name: string
-  points_balance: number
-  anonymous_leaderboard: boolean
-  enabled: boolean
-}
-
-type Dashboard = {
-  users: number
-  channels: number
-  enabled_channels: number
-  available_tokens: number
-  spent_points_today: number
-  surge_multiplier: number
-  surge_state: string
-}
-
-type TabId =
-  | 'dashboard'
-  | 'users'
-  | 'keys'
-  | 'health'
-  | 'channels'
-  | 'prices'
-  | 'affinity'
-  | 'economy'
-  | 'leaderboards'
-  | 'ledger'
-  | 'guide'
-  | 'settings'
-
-type TabItem = [TabId, string]
-const adminOnlyTabs = new Set<TabId>(['users', 'affinity', 'settings'])
-
-type ManagedUser = User & {
-  disabled_at: string | null
-  created_at: string
-  updated_at: string
-  api_key_count: number
-  channel_count: number
-  total_spent_points: number
-  total_provider_points: number
-}
-
-type LeaderboardRow = {
-  user_id: number | null
-  name: string
-  score: number
-}
-
-type LeaderboardPayload = {
-  period?: 'day' | 'month'
-  timezone?: string
-  window_start?: string
-  providers: LeaderboardRow[]
-  consumers: LeaderboardRow[]
-}
-
-type ConsoleUpdateEvent = {
-  id?: number
-  topics?: string[]
-}
-
-type ChannelHealthWindow = {
-  window_start_at: string
-  window_end_at: string
-  status: 'available' | 'empty' | 'degraded' | 'down' | 'unknown'
-  sample_count: number
-  success_count: number
-  empty_count: number
-  degraded_count: number
-  down_count: number
-  avg_ttft_ms: number | null
-}
-
-type ChannelHealthSummary = {
-  label: string
-  detail: string
-  tone: 'gray' | 'olive' | 'gold' | 'lapis' | 'wine'
-}
-
-type RankedLeaderboardRow = LeaderboardRow & {
-  key: string
-  rank: number
-  scoreText: string
-  share: number
-  tone: 'gold' | 'lapis' | 'olive' | 'plain'
-}
-
-type DefaultChannelWindow = {
-  name: string
-  limit_tokens: number
-  period_unit: string
-  period_count: number
-  timezone: string
-}
-
-type RuntimeSettings = Record<string, any> & {
-  default_api_key_spend_limit_points?: number
-  default_channel_name?: string
-  default_channel_provider?: string
-  default_channel_base_url?: string
-  default_channel_models?: string
-  default_channel_windows?: DefaultChannelWindow[]
-  default_channel_fire_sale_days_before?: number
-  default_channel_fire_sale_remaining_pct?: number
-  default_channel_fire_sale_discount?: number
-  default_channel_provider_share?: number
-  fallback_input_price_per_unit?: number
-  fallback_output_price_per_unit?: number
-  fallback_cache_price_per_unit?: number
-}
+import { apiRequest } from './api/client'
+import type {
+  AffinityRule,
+  ApiKeyCreateResponse,
+  ApiKeyRecord,
+  AuthResponse,
+  Channel,
+  ChannelQuotaWindow,
+  ChannelTestResult,
+  Dashboard,
+  EditableChannelWindow,
+  LedgerEntry,
+  LeaderboardPayload,
+  LeaderboardRow,
+  ManagedUser,
+  ModelPrice,
+  RankedLeaderboardRow,
+  RedPacketRecord,
+  RuntimeSettings,
+  SettingRecord,
+  SettingsPayload,
+  TabId,
+  TransferRecord,
+  User,
+} from './api/types'
+import HealthStrip from './components/HealthStrip.vue'
+import ProviderBadge from './components/ProviderBadge.vue'
+import { compactDate, fmt, optionalNumber, splitCsv, surgeStateLabel } from './utils/format'
+import {
+  healthCurrentWindow,
+  healthSummary,
+  healthTotals,
+  healthWindows,
+  primaryWindow,
+  quotaSummary,
+  statusClass,
+} from './utils/health'
+import { useConsoleEvents } from './composables/useConsoleEvents'
+import { adminOnlyTabs, tabBackgrounds, tabDetails, visibleTabs } from './config/tabs'
 
 const token = ref(localStorage.getItem('tokenaltar_token') || '')
 const user = ref<User | null>(null)
 const error = ref('')
 const activeTab = ref<TabId>('dashboard')
 const authMode = ref<'login' | 'register'>('login')
-const apiKeys = ref<any[]>([])
+const apiKeys = ref<ApiKeyRecord[]>([])
 const users = ref<ManagedUser[]>([])
-const channels = ref<any[]>([])
-const prices = ref<any[]>([])
-const rules = ref<any[]>([])
-const ledger = ref<any[]>([])
-const transfers = ref<any[]>([])
-const redPackets = ref<any[]>([])
+const channels = ref<Channel[]>([])
+const prices = ref<ModelPrice[]>([])
+const rules = ref<AffinityRule[]>([])
+const ledger = ref<LedgerEntry[]>([])
+const transfers = ref<TransferRecord[]>([])
+const redPackets = ref<RedPacketRecord[]>([])
 const leaderboards = ref<LeaderboardPayload>({ providers: [], consumers: [] })
 const leaderboardPeriod = ref<'day' | 'month'>('month')
-const settings = ref<any[]>([])
+const settings = ref<SettingRecord[]>([])
 const runtimeSettings = ref<RuntimeSettings>({})
 const dashboard = ref<Dashboard | null>(null)
 const newApiKey = ref('')
 const claimResult = ref('')
-const routeChannels = ref<any[]>([])
+const routeChannels = ref<Channel[]>([])
 const selectedApiKeyIds = ref<number[]>([])
 const selectedChannelIds = ref<number[]>([])
 const editingUserId = ref<number | null>(null)
@@ -152,11 +75,6 @@ const apiKeyFilter = ref('')
 const channelFilter = ref('')
 const healthFilter = ref('')
 const userFilter = ref('')
-
-const pendingConsoleTopics = new Set<string>()
-let consoleEventAbort: AbortController | null = null
-let consoleReconnectTimer: number | null = null
-let consoleRefreshTimer: number | null = null
 
 const loginForm = reactive({ email: '', password: '' })
 const registerForm = reactive({ email: '', password: '', display_name: '', invite_code: '' })
@@ -183,7 +101,7 @@ const channelForm = reactive({
   api_key_secret: '',
   models: '',
   enabled: true,
-  windows: [] as Array<DefaultChannelWindow & { anchor_at: string }>,
+  windows: [] as EditableChannelWindow[],
   fire_sale_days_before: null as number | null,
   fire_sale_remaining_pct: null as number | null,
   fire_sale_discount: null as number | null,
@@ -249,96 +167,7 @@ const settingsSchema = [
 ]
 
 const isAdmin = computed(() => user.value?.role === 'admin')
-const tabDetails: Record<TabId, { eyebrow: string; title: string; description: string }> = {
-  dashboard: {
-    eyebrow: 'Capacity Atrium',
-    title: 'Gateway dashboard',
-    description: 'Live token supply, surge pressure, and the service routes exposed to clients.',
-  },
-  users: {
-    eyebrow: 'Steward Registry',
-    title: 'User management',
-    description: 'Create accounts, adjust roles and balances, reset credentials, and suspend access.',
-  },
-  keys: {
-    eyebrow: 'Credential Gallery',
-    title: 'API key registry',
-    description: 'Issue controlled client keys and watch spend against each local allowance.',
-  },
-  channels: {
-    eyebrow: 'Provider Colonnade',
-    title: 'Channel inventory',
-    description: 'Shape upstream pools with model coverage, quota windows, and fire-sale economics.',
-  },
-  health: {
-    eyebrow: 'Pulse Arcade',
-    title: 'Channel health',
-    description: 'Passive request-derived health windows, TTFT, and provider status across upstream capacity.',
-  },
-  prices: {
-    eyebrow: 'Tariff Tablet',
-    title: 'Pricing rules',
-    description: 'Map model patterns to input, output, and cache-token settlement rates.',
-  },
-  affinity: {
-    eyebrow: 'Binding Frieze',
-    title: 'Affinity rules',
-    description: 'Keep tenants, sessions, and cache-sensitive traffic on stable routing lanes.',
-  },
-  economy: {
-    eyebrow: 'Social Treasury',
-    title: 'Point economy',
-    description: 'Move points between users, create phrase packets, and control ranking visibility.',
-  },
-  leaderboards: {
-    eyebrow: 'Monthly Honors',
-    title: 'Leaderboards',
-    description: 'Provider token contribution and consumer point burn, grouped by current month.',
-  },
-  ledger: {
-    eyebrow: 'Settlement Archive',
-    title: 'Ledger entries',
-    description: 'Trace usage, tokenizer decisions, and point formulas behind every settlement.',
-  },
-  guide: {
-    eyebrow: 'Relief Guide',
-    title: 'Project guide',
-    description: 'A visual map of the TokenAltar flow from users and keys to routing, economy, and health.',
-  },
-  settings: {
-    eyebrow: 'Admin Chamber',
-    title: 'Console settings',
-    description: 'Local invite controls for a gated TokenAltar circle.',
-  },
-}
-const tabBackgrounds: Partial<Record<TabId, string>> = {
-  dashboard: '/backgrounds/console-dashboard-overview.png',
-  keys: '/backgrounds/console-api-keys-vault.png',
-  health: '/backgrounds/console-channel-health.png',
-  prices: '/backgrounds/console-pricing-rules.png',
-  economy: '/backgrounds/console-point-economy.png',
-  leaderboards: '/backgrounds/console-leaderboards-honors.png',
-  settings: '/backgrounds/console-settings-chamber.png',
-}
-const tabs = computed<TabItem[]>(() => {
-  const items: TabItem[] = [
-    ['dashboard', 'Dashboard'],
-    ['keys', 'API Keys'],
-    ['health', 'Health'],
-    ['channels', 'Channels'],
-    ['prices', 'Pricing'],
-    ['economy', 'Economy'],
-    ['leaderboards', 'Leaderboards'],
-    ['ledger', 'Ledger'],
-    ['guide', 'Guide'],
-  ]
-  if (isAdmin.value) {
-    items.splice(1, 0, ['users', 'Users'])
-    items.splice(5, 0, ['affinity', 'Affinity'])
-    items.push(['settings', 'Settings'])
-  }
-  return items
-})
+const tabs = computed(() => visibleTabs(isAdmin.value))
 const activeTabMeta = computed(() => {
   const meta = tabDetails[activeTab.value]
   if (!isAdmin.value && activeTab.value === 'channels') {
@@ -519,25 +348,14 @@ const leaderboardSummary = computed(() => {
 })
 const priceSaveDisabled = computed(() => !isAdmin.value && !priceForm.channel_id)
 
-async function api(path: string, options: RequestInit = {}) {
+async function api<T = unknown>(path: string, options: RequestInit = {}) {
   error.value = ''
-  const response = await fetch(`/api${path}`, {
-    ...options,
-    headers: {
-      'content-type': 'application/json',
-      ...(token.value ? { authorization: `Bearer ${token.value}` } : {}),
-      ...(options.headers || {}),
-    },
-  })
-  const text = await response.text()
-  const data = text ? JSON.parse(text) : null
-  if (!response.ok) throw new Error(data?.error || response.statusText)
-  return data
+  return apiRequest<T>(path, token.value, options)
 }
 
 async function login() {
   try {
-    const data = await api('/auth/login', { method: 'POST', body: JSON.stringify(loginForm) })
+    const data = await api<AuthResponse>('/auth/login', { method: 'POST', body: JSON.stringify(loginForm) })
     acceptAuth(data)
   } catch (err) {
     error.value = String(err)
@@ -546,14 +364,14 @@ async function login() {
 
 async function register() {
   try {
-    const data = await api('/auth/register', { method: 'POST', body: JSON.stringify(registerForm) })
+    const data = await api<AuthResponse>('/auth/register', { method: 'POST', body: JSON.stringify(registerForm) })
     acceptAuth(data)
   } catch (err) {
     error.value = String(err)
   }
 }
 
-async function acceptAuth(data: any) {
+async function acceptAuth(data: AuthResponse) {
   token.value = data.token
   user.value = data.user
   localStorage.setItem('tokenaltar_token', data.token)
@@ -572,7 +390,7 @@ function logout() {
 async function refreshAll() {
   if (!token.value) return
   try {
-    user.value = await api('/me')
+    user.value = await api<User>('/me')
     ensureAllowedTab()
     if (!isAdmin.value) {
       users.value = []
@@ -599,162 +417,50 @@ async function refreshAll() {
   }
 }
 
-function startConsoleEventStream() {
-  if (!token.value) return
-  stopConsoleEventStream()
-  const controller = new AbortController()
-  consoleEventAbort = controller
-  void consumeConsoleEventStream(controller)
-}
-
-function stopConsoleEventStream() {
-  if (consoleEventAbort) {
-    consoleEventAbort.abort()
-    consoleEventAbort = null
-  }
-  if (consoleReconnectTimer !== null) {
-    window.clearTimeout(consoleReconnectTimer)
-    consoleReconnectTimer = null
-  }
-  if (consoleRefreshTimer !== null) {
-    window.clearTimeout(consoleRefreshTimer)
-    consoleRefreshTimer = null
-  }
-  pendingConsoleTopics.clear()
-}
-
-async function consumeConsoleEventStream(controller: AbortController) {
-  try {
-    const response = await fetch('/api/events', {
-      headers: {
-        accept: 'text/event-stream',
-        authorization: `Bearer ${token.value}`,
-      },
-      signal: controller.signal,
-    })
-    if (response.status === 401 || response.status === 403) {
-      logout()
-      return
-    }
-    if (!response.ok || !response.body) {
-      throw new Error(response.statusText || 'event stream unavailable')
-    }
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let streamClosed = false
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) {
-        streamClosed = true
-        break
-      }
-      buffer += decoder.decode(value, { stream: true })
-      buffer = drainConsoleEventFrames(buffer)
-    }
-    buffer += decoder.decode()
-    drainConsoleEventFrames(buffer)
-    if (streamClosed && !controller.signal.aborted && token.value) {
-      scheduleConsoleEventReconnect()
-    }
-  } catch {
-    if (!controller.signal.aborted && token.value) {
-      scheduleConsoleEventReconnect()
-    }
-  } finally {
-    if (consoleEventAbort === controller) {
-      consoleEventAbort = null
-    }
-  }
-}
-
-function scheduleConsoleEventReconnect() {
-  if (consoleReconnectTimer !== null || !token.value) return
-  consoleReconnectTimer = window.setTimeout(() => {
-    consoleReconnectTimer = null
-    startConsoleEventStream()
-  }, 2000)
-}
-
-function drainConsoleEventFrames(buffer: string) {
-  const normalized = buffer.replace(/\r\n/g, '\n')
-  const frames = normalized.split('\n\n')
-  const remainder = frames.pop() || ''
-  for (const frame of frames) {
-    handleConsoleEventFrame(frame)
-  }
-  return remainder
-}
-
-function handleConsoleEventFrame(frame: string) {
-  const data = frame
-    .split('\n')
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice(5).trimStart())
-    .join('\n')
-  if (!data) return
-  try {
-    const event = JSON.parse(data) as ConsoleUpdateEvent
-    queueConsoleTopicRefresh(event.topics || [])
-  } catch {
-    queueConsoleTopicRefresh(['sync'])
-  }
-}
-
-function queueConsoleTopicRefresh(topics: string[]) {
-  for (const topic of topics) {
-    if (topic !== 'connected') {
-      pendingConsoleTopics.add(topic)
-    }
-  }
-  if (pendingConsoleTopics.size === 0 || consoleRefreshTimer !== null) return
-  consoleRefreshTimer = window.setTimeout(() => {
-    consoleRefreshTimer = null
-    void flushConsoleTopicRefresh()
-  }, 250)
-}
-
-async function flushConsoleTopicRefresh() {
-  if (!token.value) return
-  const topics = new Set(pendingConsoleTopics)
-  pendingConsoleTopics.clear()
-  try {
-    if (topics.has('sync')) {
-      await refreshAll()
-      return
-    }
-    const tasks: Promise<unknown>[] = []
-    if (topics.has('me')) tasks.push(refreshMe().then(ensureAllowedTab))
-    if (topics.has('runtimeSettings')) tasks.push(loadRuntimeSettings())
-    if (topics.has('dashboard')) tasks.push(loadDashboard())
-    if (topics.has('users') && isAdmin.value) tasks.push(loadUsers())
-    if (topics.has('apiKeys')) tasks.push(loadRouteChannels())
-    if (topics.has('channels')) tasks.push(Promise.all([loadChannels(), loadRouteChannels()]))
-    if (topics.has('prices')) tasks.push(loadPrices())
-    if (topics.has('affinityRules') && isAdmin.value) tasks.push(loadRules())
-    if (topics.has('ledger')) tasks.push(loadLedger())
-    if (topics.has('transfers')) tasks.push(loadTransfers())
-    if (topics.has('redPackets')) tasks.push(loadRedPackets())
-    if (topics.has('leaderboards')) tasks.push(loadLeaderboards())
-    if (topics.has('settings') && isAdmin.value) tasks.push(loadSettings())
-    await Promise.all(tasks)
-  } catch (err) {
+const { start: startConsoleEventStream, stop: stopConsoleEventStream } = useConsoleEvents({
+  getToken: () => token.value,
+  onUnauthorized: () => logout(),
+  onTopics: refreshConsoleTopics,
+  onError: (err) => {
     error.value = String(err)
     logout()
+  },
+})
+
+async function refreshConsoleTopics(topics: Set<string>) {
+  if (!token.value) return
+  if (topics.has('sync')) {
+    await refreshAll()
+    return
   }
+  const tasks: Promise<unknown>[] = []
+  if (topics.has('me')) tasks.push(refreshMe().then(ensureAllowedTab))
+  if (topics.has('runtimeSettings')) tasks.push(loadRuntimeSettings())
+  if (topics.has('dashboard')) tasks.push(loadDashboard())
+  if (topics.has('users') && isAdmin.value) tasks.push(loadUsers())
+  if (topics.has('apiKeys')) tasks.push(loadRouteChannels())
+  if (topics.has('channels')) tasks.push(Promise.all([loadChannels(), loadRouteChannels()]))
+  if (topics.has('prices')) tasks.push(loadPrices())
+  if (topics.has('affinityRules') && isAdmin.value) tasks.push(loadRules())
+  if (topics.has('ledger')) tasks.push(loadLedger())
+  if (topics.has('transfers')) tasks.push(loadTransfers())
+  if (topics.has('redPackets')) tasks.push(loadRedPackets())
+  if (topics.has('leaderboards')) tasks.push(loadLeaderboards())
+  if (topics.has('settings') && isAdmin.value) tasks.push(loadSettings())
+  await Promise.all(tasks)
 }
 
-async function loadDashboard() { dashboard.value = await api('/dashboard') }
-async function loadUsers() { users.value = await api('/users') }
-async function loadApiKeys() { apiKeys.value = await api('/api-keys') }
+async function loadDashboard() { dashboard.value = await api<Dashboard>('/dashboard') }
+async function loadUsers() { users.value = await api<ManagedUser[]>('/users') }
+async function loadApiKeys() { apiKeys.value = await api<ApiKeyRecord[]>('/api-keys') }
 async function loadRouteChannels() {
-  routeChannels.value = await api('/route-channels')
+  routeChannels.value = await api<Channel[]>('/route-channels')
   pruneApiKeyChannelSelection()
   applyDefaultApiKeyChannels()
   await loadApiKeys()
 }
 async function loadChannels() {
-  channels.value = await api('/channels')
+  channels.value = await api<Channel[]>('/channels')
   pruneApiKeyChannelSelection()
   if (!isAdmin.value && channels.value.length === 0) {
     priceForm.channel_id = null
@@ -762,20 +468,20 @@ async function loadChannels() {
     priceForm.channel_id = channels.value[0].id
   }
 }
-async function loadPrices() { prices.value = await api('/prices') }
-async function loadRules() { rules.value = await api('/affinity-rules') }
-async function loadLedger() { ledger.value = await api('/ledger') }
-async function loadTransfers() { transfers.value = await api('/transfers') }
-async function loadRedPackets() { redPackets.value = await api('/red-packets') }
-async function loadLeaderboards() { leaderboards.value = await api(`/leaderboards?period=${leaderboardPeriod.value}`) }
+async function loadPrices() { prices.value = await api<ModelPrice[]>('/prices') }
+async function loadRules() { rules.value = await api<AffinityRule[]>('/affinity-rules') }
+async function loadLedger() { ledger.value = await api<LedgerEntry[]>('/ledger') }
+async function loadTransfers() { transfers.value = await api<TransferRecord[]>('/transfers') }
+async function loadRedPackets() { redPackets.value = await api<RedPacketRecord[]>('/red-packets') }
+async function loadLeaderboards() { leaderboards.value = await api<LeaderboardPayload>(`/leaderboards?period=${leaderboardPeriod.value}`) }
 
 async function loadRuntimeSettings() {
-  runtimeSettings.value = await api('/runtime-settings')
+  runtimeSettings.value = await api<RuntimeSettings>('/runtime-settings')
   applyRuntimeDefaults()
 }
 
 async function loadSettings() {
-  const payload = await api('/settings')
+  const payload = await api<SettingsPayload>('/settings')
   settings.value = payload.settings || []
   runtimeSettings.value = payload.runtime || runtimeSettings.value
   for (const setting of settings.value) {
@@ -785,7 +491,7 @@ async function loadSettings() {
 }
 
 async function createManagedUser() {
-  const created = await api('/users', {
+  const created = await api<ManagedUser>('/users', {
     method: 'POST',
     body: JSON.stringify({
       email: userForm.email,
@@ -803,7 +509,7 @@ async function createManagedUser() {
 
 async function saveManagedUser() {
   if (!editingUserId.value) return
-  const updated = await api(`/users/${editingUserId.value}`, {
+  const updated = await api<ManagedUser>(`/users/${editingUserId.value}`, {
     method: 'PATCH',
     body: JSON.stringify({
       email: userForm.email,
@@ -821,7 +527,7 @@ async function saveManagedUser() {
 }
 
 async function toggleManagedUser(record: ManagedUser) {
-  const updated = await api(`/users/${record.id}/enabled`, {
+  const updated = await api<ManagedUser>(`/users/${record.id}/enabled`, {
     method: 'POST',
     body: JSON.stringify({ enabled: !record.enabled }),
   })
@@ -862,7 +568,7 @@ function resetManagedUserForm() {
 }
 
 async function createApiKey() {
-  const data = await api('/api-keys', {
+  const data = await api<ApiKeyCreateResponse>('/api-keys', {
     method: 'POST',
     body: JSON.stringify(apiKeyPayload()),
   })
@@ -872,7 +578,7 @@ async function createApiKey() {
   selectApiKey(data.record)
 }
 
-async function toggleApiKey(record: any) {
+async function toggleApiKey(record: ApiKeyRecord) {
   await api(`/api-keys/${record.id}/enabled`, {
     method: 'POST',
     body: JSON.stringify({ enabled: !record.enabled }),
@@ -889,14 +595,14 @@ async function saveApiKey() {
   await loadApiKeys()
 }
 
-async function rotateApiKey(record: any) {
-  const data = await api(`/api-keys/${record.id}/rotate`, { method: 'POST' })
+async function rotateApiKey(record: ApiKeyRecord) {
+  const data = await api<ApiKeyCreateResponse>(`/api-keys/${record.id}/rotate`, { method: 'POST' })
   newApiKey.value = data.token
   editingApiKeyId.value = record.id
   await loadApiKeys()
 }
 
-async function deleteApiKey(record: any) {
+async function deleteApiKey(record: ApiKeyRecord) {
   await api(`/api-keys/${record.id}`, { method: 'DELETE' })
   selectedApiKeyIds.value = selectedApiKeyIds.value.filter((id) => id !== record.id)
   if (editingApiKeyId.value === record.id) resetApiKeyForm()
@@ -926,13 +632,13 @@ function toggleFilteredApiKeys() {
   ]))
 }
 
-function filterApiKeyChannels(source: any[], query: string) {
+function filterApiKeyChannels(source: Channel[], query: string) {
   const needle = query.trim().toLowerCase()
   if (!needle) return source
   return source.filter((channel) => channelSearchText(channel).includes(needle))
 }
 
-function channelSearchText(channel: any) {
+function channelSearchText(channel: Channel) {
   const totals = healthTotals(channel)
   return [
     channel.name,
@@ -1042,7 +748,7 @@ function apiKeyChannelNames(ids: unknown[]) {
   return extra > 0 ? `${names.join(', ')} +${extra}` : names.join(', ')
 }
 
-function channelCardTitle(channel: any) {
+function channelCardTitle(channel: Channel) {
   return [
     channel.name,
     ownerLabel(channel),
@@ -1052,7 +758,7 @@ function channelCardTitle(channel: any) {
   ].join(' / ')
 }
 
-function selectApiKey(record: any) {
+function selectApiKey(record: ApiKeyRecord) {
   editingApiKeyId.value = record.id
   apiKeyForm.name = record.name
   apiKeyForm.spend_limit_points = record.spend_limit_points
@@ -1108,7 +814,7 @@ async function saveChannel() {
   await Promise.all([loadChannels(), loadDashboard()])
 }
 
-async function toggleChannel(channel: any) {
+async function toggleChannel(channel: Channel) {
   await api(`/channels/${channel.id}/enabled`, {
     method: 'POST',
     body: JSON.stringify({ enabled: !channel.enabled }),
@@ -1116,15 +822,15 @@ async function toggleChannel(channel: any) {
   await Promise.all([loadChannels(), loadDashboard()])
 }
 
-async function deleteChannel(channel: any) {
+async function deleteChannel(channel: Channel) {
   await api(`/channels/${channel.id}`, { method: 'DELETE' })
   selectedChannelIds.value = selectedChannelIds.value.filter((id) => id !== channel.id)
   if (editingChannelId.value === channel.id) resetChannelForm()
   await Promise.all([loadChannels(), loadDashboard()])
 }
 
-async function copyChannel(channel: any) {
-  const copied = await api(`/channels/${channel.id}/copy`, {
+async function copyChannel(channel: Channel) {
+  const copied = await api<Channel>(`/channels/${channel.id}/copy`, {
     method: 'POST',
     body: JSON.stringify({ suffix: ' copy', reset_usage: true }),
   })
@@ -1132,9 +838,9 @@ async function copyChannel(channel: any) {
   selectChannel(copied)
 }
 
-async function testChannel(channel: any) {
+async function testChannel(channel: Channel) {
   channelTestResults.value[channel.id] = 'testing...'
-  const result = await api(`/channels/${channel.id}/test`, { method: 'POST' })
+  const result = await api<ChannelTestResult>(`/channels/${channel.id}/test`, { method: 'POST' })
   channelTestResults.value[channel.id] = `${result.ok ? 'OK' : 'Failed'} / ${result.latency_ms}ms / ${result.message}`
   await loadChannels()
 }
@@ -1148,7 +854,7 @@ async function setSelectedChannels(enabled: boolean) {
   await Promise.all([loadChannels(), loadDashboard()])
 }
 
-function selectChannel(channel: any) {
+function selectChannel(channel: Channel) {
   editingChannelId.value = channel.id
   channelForm.name = channel.name
   channelForm.provider = channel.provider
@@ -1190,7 +896,7 @@ function defaultAnchor() {
   return new Date().toISOString().slice(0, 19)
 }
 
-function cloneWindows(windows: any[]) {
+function cloneWindows(windows: Partial<ChannelQuotaWindow>[]) {
   return windows.map((window) => ({
     name: window.name || 'Window',
     limit_tokens: Number(window.limit_tokens || 0),
@@ -1239,26 +945,26 @@ async function savePrice() {
   await loadPrices()
 }
 
-function priceScope(price: any) {
+function priceScope(price: ModelPrice) {
   if (!price.channel_id) return isAdmin.value ? 'Global default' : 'Default fallback'
   const channel = channels.value.find((item) => item.id === price.channel_id)
   return channel ? channelOptionLabel(channel) : `Channel #${price.channel_id}`
 }
 
-function isGlobalPrice(price: any) {
+function isGlobalPrice(price: ModelPrice) {
   return !price.channel_id
 }
 
-function ownerLabel(record: any) {
+function ownerLabel(record: { owner_user_id?: number | null; owner_display_name?: string | null }) {
   if (record?.owner_display_name) return record.owner_display_name
   return record?.owner_user_id ? `User #${record.owner_user_id}` : '-'
 }
 
-function channelOptionLabel(channel: any) {
+function channelOptionLabel(channel: Channel) {
   return isAdmin.value ? `${channel.name} (${ownerLabel(channel)})` : channel.name
 }
 
-function priceOwnerLabel(price: any) {
+function priceOwnerLabel(price: ModelPrice) {
   if (!price.channel_id) return 'System'
   const channel = channels.value.find((item) => item.id === price.channel_id)
   return channel ? ownerLabel(channel) : '-'
@@ -1293,13 +999,13 @@ async function createRedPacket() {
 }
 
 async function claimRedPacket() {
-  const data = await api('/red-packets/claim', { method: 'POST', body: JSON.stringify(claimForm) })
+  const data = await api<{ points: number }>('/red-packets/claim', { method: 'POST', body: JSON.stringify(claimForm) })
   claimResult.value = `Claimed ${data.points.toFixed(4)} points`
   await Promise.all([loadRedPackets(), refreshMe()])
 }
 
 async function toggleAnonymous() {
-  const updated = await api('/profile/anonymous-leaderboard', {
+  const updated = await api<User>('/profile/anonymous-leaderboard', {
     method: 'POST',
     body: JSON.stringify({ enabled: !user.value?.anonymous_leaderboard }),
   })
@@ -1365,46 +1071,19 @@ function applyRuntimeDefaults() {
 }
 
 async function refreshMe() {
-  user.value = await api('/me')
+  user.value = await api<User>('/me')
 }
 
-function fmt(value: number | undefined, digits = 2) {
-  return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: digits })
-}
-
-function surgeStateLabel(value: string | undefined) {
-  const labels: Record<string, string> = {
-    idle: 'Idle',
-    normal: 'Normal',
-    peak: 'Peak',
-    no_capacity: 'No capacity',
-  }
-  return labels[value || 'idle'] || 'Idle'
-}
-
-function compactDate(value: string | null | undefined) {
-  if (!value) return 'now'
-  const normalized = value.includes('T') ? value : value.replace(' ', 'T')
-  const date = new Date(normalized.endsWith('Z') ? normalized : `${normalized}Z`)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-function transferDirection(item: any) {
+function transferDirection(item: TransferRecord) {
   return item.to_user_id === user.value?.id ? 'In' : 'Out'
 }
 
-function signedTransferPoints(item: any) {
+function signedTransferPoints(item: TransferRecord) {
   const sign = item.to_user_id === user.value?.id ? '+' : '-'
   return `${sign}${fmt(item.points, 4)}`
 }
 
-function packetClaimedPct(packet: any) {
+function packetClaimedPct(packet: RedPacketRecord) {
   const total = Number(packet.total_parts || 0)
   if (total <= 0) return 0
   return Math.min(100, Math.max(0, Math.round((Number(packet.claimed_parts || 0) / total) * 100)))
@@ -1466,137 +1145,6 @@ function channelPayload() {
     provider_share: Number(channelForm.provider_share),
     api_key_secret: channelForm.api_key_secret || null,
     models: splitCsv(channelForm.models),
-  }
-}
-
-function splitCsv(value: string) {
-  return value.split(',').map((item) => item.trim()).filter(Boolean)
-}
-
-function optionalNumber(value: number | string | null) {
-  if (value === null || value === '') return null
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-function healthWindows(channel: any): ChannelHealthWindow[] {
-  return Array.isArray(channel.health_windows) ? channel.health_windows : []
-}
-
-function healthSummary(channel: any): ChannelHealthSummary {
-  const windows = healthWindows(channel)
-  const current = windows[windows.length - 1]
-  if (current && current.sample_count > 0) {
-    const labelByStatus: Record<ChannelHealthWindow['status'], string> = {
-      available: 'Available',
-      empty: 'Empty',
-      degraded: 'Degraded',
-      down: 'Down',
-      unknown: 'Gray',
-    }
-    const toneByStatus: Record<ChannelHealthWindow['status'], ChannelHealthSummary['tone']> = {
-      available: 'olive',
-      empty: 'gold',
-      degraded: 'lapis',
-      down: 'wine',
-      unknown: 'gray',
-    }
-    const ttft = current.avg_ttft_ms === null ? 'TTFT n/a' : `TTFT ${fmt(current.avg_ttft_ms, 0)}ms`
-    const sample = `${current.sample_count} sample${current.sample_count === 1 ? '' : 's'}`
-    return {
-      label: labelByStatus[current.status],
-      detail: `${sample} · ${ttft}`,
-      tone: toneByStatus[current.status],
-    }
-  }
-  return {
-    label: 'Gray',
-    detail: 'No records in current window',
-    tone: 'gray',
-  }
-}
-
-function healthBarClass(window: ChannelHealthWindow) {
-  return {
-    gray: window.sample_count === 0 || window.status === 'unknown',
-    olive: window.status === 'available' && window.success_count > 0 && window.empty_count === 0 && window.degraded_count === 0 && window.down_count === 0,
-    gold: window.status === 'empty' || (window.status === 'available' && window.empty_count > 0),
-    lapis: window.status === 'degraded' || (window.status === 'available' && window.degraded_count > 0),
-    wine: window.status === 'down' || (window.status === 'available' && window.down_count > 0),
-  }
-}
-
-function healthWindowTitle(window: ChannelHealthWindow) {
-  const ttft = window.avg_ttft_ms === null ? 'TTFT n/a' : `TTFT ${fmt(window.avg_ttft_ms, 0)}ms`
-  return [
-    `${window.window_start_at} → ${window.window_end_at}`,
-    `status: ${window.status}`,
-    `samples: ${window.sample_count}`,
-    `available: ${window.success_count}`,
-    `empty: ${window.empty_count}`,
-    `degraded: ${window.degraded_count}`,
-    `down: ${window.down_count}`,
-    ttft,
-  ].join(' · ')
-}
-
-function healthTotals(channel: any) {
-  const windows = healthWindows(channel)
-  let ttftNumerator = 0
-  let ttftDenominator = 0
-  const totals = windows.reduce((acc, window) => {
-    acc.samples += window.sample_count
-    acc.available += window.success_count
-    acc.empty += window.empty_count
-    acc.degraded += window.degraded_count
-    acc.down += window.down_count
-    if (window.avg_ttft_ms !== null && window.success_count > 0) {
-      ttftNumerator += window.avg_ttft_ms * window.success_count
-      ttftDenominator += window.success_count
-    }
-    return acc
-  }, {
-    samples: 0,
-    available: 0,
-    empty: 0,
-    degraded: 0,
-    down: 0,
-  })
-  return {
-    ...totals,
-    avgTtftMs: ttftDenominator > 0 ? ttftNumerator / ttftDenominator : null,
-  }
-}
-
-function healthCurrentWindow(channel: any) {
-  const windows = healthWindows(channel)
-  return windows[windows.length - 1] || null
-}
-
-function providerTone(provider: string) {
-  const normalized = String(provider || '').toLowerCase()
-  return {
-    openai: normalized === 'openai',
-    anthropic: normalized === 'anthropic',
-    gemini: normalized === 'gemini',
-  }
-}
-
-function primaryWindow(channel: any) {
-  return channel.limits?.windows?.[0] || null
-}
-
-function quotaSummary(channel: any) {
-  return (channel.limits?.windows || [])
-    .map((window: any) => `${window.name}: ${fmt(window.limit_tokens - window.used_tokens, 0)}`)
-    .join(' / ') || '-'
-}
-
-function statusClass(record: any) {
-  return {
-    off: !record.enabled || record.status === 'manual_disabled',
-    warn: record.status === 'cooling',
-    danger: record.status === 'deleted',
   }
 }
 
@@ -1743,7 +1291,7 @@ onBeforeUnmount(stopConsoleEventStream)
                 <div class="channel-identity">
                   <div class="channel-title-line">
                     <h3>{{ channel.name }}</h3>
-                    <span class="provider-badge" :class="providerTone(channel.provider)">{{ channel.provider }}</span>
+                    <ProviderBadge :provider="channel.provider" />
                   </div>
                   <div class="channel-subtitle">
                     <span>{{ ownerLabel(channel) }}</span>
@@ -1763,15 +1311,12 @@ onBeforeUnmount(stopConsoleEventStream)
                 </div>
               </div>
 
-              <div class="health-strip large" :aria-label="`Channel health windows for ${channel.name}`">
-                <span
-                  v-for="window in healthWindows(channel)"
-                  :key="`${channel.id}:health-page:${window.window_start_at}`"
-                  class="health-window"
-                  :class="healthBarClass(window)"
-                  :title="healthWindowTitle(window)"
-                ></span>
-              </div>
+              <HealthStrip
+                :windows="healthWindows(channel)"
+                :channel-name="channel.name"
+                :key-prefix="`${channel.id}:health-page`"
+                variant="large"
+              />
 
               <div class="health-stat-row">
                 <span><strong>{{ healthTotals(channel).samples }}</strong> samples</span>
@@ -1919,19 +1464,18 @@ onBeforeUnmount(stopConsoleEventStream)
                           <button class="ghost channel-select-action" type="button" title="Add channel" aria-label="Add channel" @click.stop="addApiKeyChannel(channel.id)">+</button>
                         </div>
                         <div class="channel-select-meta">
-                          <span class="provider-badge compact" :class="providerTone(channel.provider)">{{ channel.provider }}</span>
+                          <ProviderBadge :provider="channel.provider" compact />
                           <span class="status" :class="statusClass(channel)">{{ channel.enabled ? channel.status : 'disabled' }}</span>
                           <span class="channel-select-owner">{{ ownerLabel(channel) }}</span>
                           <span class="channel-select-models">{{ (channel.models || []).join(', ') || '*' }}</span>
                         </div>
-                        <div class="mini-health-strip compact" :aria-label="`Health ${healthSummary(channel).label}`">
-                          <span
-                            v-for="window in healthWindows(channel).slice(-16)"
-                            :key="`${channel.id}:available-mini:${window.window_start_at}`"
-                            class="health-window"
-                            :class="healthBarClass(window)"
-                          ></span>
-                        </div>
+                        <HealthStrip
+                          :windows="healthWindows(channel)"
+                          :channel-name="channel.name"
+                          :key-prefix="`${channel.id}:available-mini`"
+                          variant="compact"
+                          :limit="16"
+                        />
                       </article>
                       <div v-if="filteredAvailableApiKeyChannels.length === 0" class="channel-picker-empty">No available channels match.</div>
                     </div>
@@ -1962,19 +1506,18 @@ onBeforeUnmount(stopConsoleEventStream)
                           <button class="ghost danger channel-select-action" type="button" title="Remove channel" aria-label="Remove channel" @click.stop="removeApiKeyChannel(channel.id)">-</button>
                         </div>
                         <div class="channel-select-meta">
-                          <span class="provider-badge compact" :class="providerTone(channel.provider)">{{ channel.provider }}</span>
+                          <ProviderBadge :provider="channel.provider" compact />
                           <span class="status" :class="statusClass(channel)">{{ channel.enabled ? channel.status : 'disabled' }}</span>
                           <span class="channel-select-owner">{{ ownerLabel(channel) }}</span>
                           <span class="channel-select-models">{{ (channel.models || []).join(', ') || '*' }}</span>
                         </div>
-                        <div class="mini-health-strip compact" :aria-label="`Health ${healthSummary(channel).label}`">
-                          <span
-                            v-for="window in healthWindows(channel).slice(-16)"
-                            :key="`${channel.id}:selected-mini:${window.window_start_at}`"
-                            class="health-window"
-                            :class="healthBarClass(window)"
-                          ></span>
-                        </div>
+                        <HealthStrip
+                          :windows="healthWindows(channel)"
+                          :channel-name="channel.name"
+                          :key-prefix="`${channel.id}:selected-mini`"
+                          variant="compact"
+                          :limit="16"
+                        />
                       </article>
                       <div v-if="filteredSelectedApiKeyChannels.length === 0" class="channel-picker-empty">Drop channels here to authorize this key.</div>
                     </div>
@@ -2113,15 +1656,11 @@ onBeforeUnmount(stopConsoleEventStream)
                       <strong :class="`tone-${healthSummary(channel).tone}`">{{ healthSummary(channel).label }}</strong>
                       <span>{{ healthSummary(channel).detail }}</span>
                     </div>
-                    <div class="health-strip" :aria-label="`Channel health windows for ${channel.name}`">
-                      <span
-                        v-for="window in healthWindows(channel)"
-                        :key="`${channel.id}:${window.window_start_at}`"
-                        class="health-window"
-                        :class="healthBarClass(window)"
-                        :title="healthWindowTitle(window)"
-                      ></span>
-                    </div>
+                    <HealthStrip
+                      :windows="healthWindows(channel)"
+                      :channel-name="channel.name"
+                      :key-prefix="`${channel.id}`"
+                    />
                   </td>
                   <td>
                     <div class="row-actions">
